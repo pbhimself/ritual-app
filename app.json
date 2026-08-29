@@ -2,6 +2,7 @@
   "expo": {
     "name": "Rituals Habit",
     "slug": "ritual-app",
+    "scheme": "com.pratikbhangale.rituals",
     "version": "1.0.6",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -12,6 +13,9 @@
     "android": {
       "package": "com.pratikbhangale.rituals",
       "versionCode": 7,
+      "permissions": [
+        "android.permission.POST_NOTIFICATIONS"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#17284A",
         "foregroundImage": "./assets/android-icon-foreground.png",

@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { withAndroidManifest, withDangerousMod } = require('@expo/config-plugins');
 
+const APP_SCHEME = 'com.pratikbhangale.rituals';
 const NETWORK_SECURITY_CONFIG = `<?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
   <base-config cleartextTrafficPermitted="false">
@@ -82,22 +83,50 @@ module.exports = ({ config }) => {
   const hasNavigationBarConfig = plugins.some((plugin) => (
     Array.isArray(plugin) ? plugin[0] === 'expo-navigation-bar' : plugin === 'expo-navigation-bar'
   ));
+  const hasNotificationsConfig = plugins.some((plugin) => (
+    Array.isArray(plugin) ? plugin[0] === 'expo-notifications' : plugin === 'expo-notifications'
+  ));
+  const notificationPlugin = [
+    'expo-notifications',
+    {
+      icon: './assets/android-icon-monochrome.png',
+      color: '#4FA8FF',
+      defaultChannel: 'ritual-reminders',
+      enableBackgroundRemoteNotifications: false,
+    },
+  ];
+  const configuredPlugins = plugins.map((plugin) => (
+    plugin === 'expo-notifications' ? notificationPlugin : plugin
+  ));
+  const nextPlugins = [
+    ...configuredPlugins,
+    ...(hasNavigationBarConfig
+      ? []
+      : [[
+          'expo-navigation-bar',
+          {
+            enforceContrast: false,
+            hidden: false,
+            style: 'dark',
+          },
+        ]]),
+    ...(hasNotificationsConfig
+      ? []
+      : [notificationPlugin]),
+  ];
+  const androidPermissions = Array.from(new Set([
+    ...(config.android?.permissions ?? []),
+    'android.permission.POST_NOTIFICATIONS',
+  ]));
 
   const nextConfig = {
     ...config,
-    plugins: hasNavigationBarConfig
-      ? plugins
-      : [
-          ...plugins,
-          [
-            'expo-navigation-bar',
-            {
-              enforceContrast: false,
-              hidden: false,
-              style: 'dark',
-            },
-          ],
-        ],
+    scheme: config.scheme || APP_SCHEME,
+    plugins: nextPlugins,
+    android: {
+      ...config.android,
+      permissions: androidPermissions,
+    },
     extra: {
       ...config.extra,
       ...(supabaseUrl ? { supabaseUrl } : {}),

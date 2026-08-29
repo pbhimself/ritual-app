@@ -14,6 +14,7 @@ import { NavigationBar } from 'expo-navigation-bar';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import Constants from 'expo-constants';
+import * as ExpoLinking from 'expo-linking';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import {
   AccessibilityInfo,
@@ -95,7 +96,7 @@ import {
   Zap,
 } from 'lucide-react-native';
 import React, { ComponentType, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { createClient, type SupabaseClient, User as SupabaseUser } from '@supabase/supabase-js';
+import { createClient, type Session as SupabaseSession, type SupabaseClient, User as SupabaseUser } from '@supabase/supabase-js';
 
 type TabKey = 'today' | 'progress' | 'insights' | 'profile';
 type PaletteKey =
@@ -196,6 +197,7 @@ type SavedFlowState = {
   rhythmPoints: number;
   graceHearts: number;
   onboardingDream?: DreamId | null;
+  tourCompleted?: boolean;
   settings: FlowSettings;
   insight: string;
   stateDate?: string;
@@ -211,6 +213,14 @@ type HeaderMetric = {
   icon: string;
   value: number;
   label: string;
+  color: string;
+};
+
+type TodayTourStep = {
+  id: 'goal' | 'streak' | 'points' | 'hearts';
+  icon: string;
+  title: string;
+  body: string;
   color: string;
 };
 
@@ -343,12 +353,20 @@ type SupabaseProfile = {
 };
 
 type ReminderScheduleRecord = Record<string, { notificationId: string; reminderTime: string; body: string }>;
+type WebNotificationConstructor = {
+  permission?: 'default' | 'denied' | 'granted';
+  requestPermission?: () => Promise<'default' | 'denied' | 'granted'>;
+  new (title: string, options?: Record<string, unknown>): unknown;
+};
 
 const STORAGE_KEY = 'flow-liquid-redesign-v4-clean';
 const AUTH_STORAGE_KEY = 'flow-auth-v1';
 const ASK_FLO_POSITION_STORAGE_KEY = 'ask-flo-launcher-position-v1';
 const HERO_THEME_OVERRIDE_STORAGE_KEY = 'rituals-hero-theme-override-v1';
 const REMINDER_NOTIFICATION_STORAGE_KEY = 'ritual-reminder-notifications-v1';
+const REMINDER_NOTIFICATION_CHANNEL_ID = 'ritual-reminders';
+const APP_SCHEME = 'com.pratikbhangale.rituals';
+const AUTH_CALLBACK_PATH = 'auth/callback';
 const DEFAULT_COUNTRY_CODE = '+91';
 const DEFAULT_COUNTRY_FLAG = '🇮🇳';
 const PROFILE_SELECT = 'id,username,name,email,avatar_emoji,dark_theme,haptics_enabled,push_enabled,age,city,mobile,country_code,gender,habit_focus,profile_complete,profile_setup_skipped';
@@ -489,7 +507,8 @@ const supabaseAnonKey = readRuntimeString(
   runtimeEnv.VITE_SUPABASE_ANON_KEY,
   runtimeExtra.supabaseAnonKey,
 );
-const authRedirectUrl = Platform.OS === 'web' && typeof window !== 'undefined' ? window.location.origin : undefined;
+const nativeAuthRedirectUrl = `${APP_SCHEME}://${AUTH_CALLBACK_PATH}`;
+const authRedirectUrl = Platform.OS === 'web' && typeof window !== 'undefined' ? window.location.origin : nativeAuthRedirectUrl;
 const supabase = supabaseUrl && supabaseAnonKey
   ? createClient(supabaseUrl, supabaseAnonKey, {
       auth: {
@@ -626,7 +645,8 @@ const ritualIconLibrary: Array<{ key: PaletteKey; icon: string; label: string }>
   { key: 'noPhone', icon: '📵', label: 'No Phone' },
 ];
 const goalUnits: GoalUnit[] = ['liters', 'minutes', 'hours', 'meals', 'sessions', 'pages', 'reps', 'glasses'];
-const reminderPresets = [
+const reminderPresets: Array<{ label: string; value?: string }> = [
+  { label: 'Off', value: undefined },
   { label: '8:00 AM', value: '08:00' },
   { label: '1:00 PM', value: '13:00' },
   { label: '8:00 PM', value: '20:00' },
@@ -682,6 +702,37 @@ const weekLabels = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 const genderOptions = ['Female', 'Male', 'Other'];
 const habitFocusOptions = ['Reading', 'Fitness', 'Mindfulness', 'Sleep', 'Hydration', 'Food'];
 
+const todayTourSteps: TodayTourStep[] = [
+  {
+    id: 'goal',
+    icon: '◎',
+    title: 'Daily goal',
+    body: 'This circle shows how much of today is complete. Finish rituals and the percent fills up.',
+    color: colors.blue1,
+  },
+  {
+    id: 'streak',
+    icon: '🔥',
+    title: 'Fire streak',
+    body: 'Complete at least one ritual today to keep the flame moving tomorrow.',
+    color: colors.orange,
+  },
+  {
+    id: 'points',
+    icon: '💎',
+    title: 'Diamonds',
+    body: 'Diamonds are rhythm points. You earn them for completions and good timing.',
+    color: colors.blue1,
+  },
+  {
+    id: 'hearts',
+    icon: '💕',
+    title: 'Grace hearts',
+    body: 'Hearts protect your progress when you miss a day. They keep the routine forgiving.',
+    color: colors.pink,
+  },
+];
+
 const seedSettings: FlowSettings = {
   pushNotifications: true,
   messageAlerts: true,
@@ -701,12 +752,14 @@ const defaultState: SavedFlowState = {
   rhythmPoints: 0,
   graceHearts: 5,
   onboardingDream: null,
+  tourCompleted: false,
   settings: seedSettings,
   insight: '',
 };
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 const AnimatedPath = Animated.createAnimatedComponent(Path);
+const webReminderTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -787,19 +840,121 @@ async function resolveIdentifierEmail(client: SupabaseClient | null, identifier:
   if (!client) {
     return normalized;
   }
-  const { data, error } = await client
+  const { data, error } = await client.rpc('email_for_username', { lookup_username: normalized });
+  if (!error && typeof data === 'string' && data) {
+    return data;
+  }
+
+  const fallback = await client
     .from('profiles')
     .select('email')
-    .eq('username', normalized)
+    .ilike('username', normalized)
     .maybeSingle();
-  if (error) {
-    throw error;
+  if (fallback.error) {
+    throw fallback.error;
   }
-  const email = (data as Pick<SupabaseProfile, 'email'> | null)?.email;
+  const email = (fallback.data as Pick<SupabaseProfile, 'email'> | null)?.email;
   if (!email) {
     throw new Error('Account not found for that username.');
   }
   return email;
+}
+
+async function readReminderSchedules(storageKey: string) {
+  const storedRaw = await AsyncStorage.getItem(storageKey);
+  if (!storedRaw) {
+    return {};
+  }
+  try {
+    return JSON.parse(storedRaw) as ReminderScheduleRecord;
+  } catch {
+    return {};
+  }
+}
+
+function clearWebReminderTimers(storageKey: string) {
+  for (const [key, timer] of webReminderTimers.entries()) {
+    if (key.startsWith(`${storageKey}:`)) {
+      clearTimeout(timer);
+      webReminderTimers.delete(key);
+    }
+  }
+}
+
+function getWebNotificationConstructor() {
+  return (globalThis as typeof globalThis & { Notification?: WebNotificationConstructor }).Notification;
+}
+
+function scheduleWebReminderTimer(storageKey: string, ritual: Ritual, body: string) {
+  if (!isValidReminderTime(ritual.reminderTime)) {
+    return null;
+  }
+  const notificationCtor = getWebNotificationConstructor();
+  if (!notificationCtor || notificationCtor.permission !== 'granted') {
+    return null;
+  }
+  const key = `${storageKey}:${ritual.id}`;
+  const fireAt = nextReminderDate(ritual.reminderTime);
+  const delay = Math.max(0, Math.min(fireAt.getTime() - Date.now(), 2147483647));
+  const timer = setTimeout(() => {
+    try {
+      new notificationCtor(ritualReminderTitle(ritual.name), {
+        body,
+        tag: key,
+        renotify: false,
+        data: { ritualId: ritual.id, screen: 'today' },
+      });
+    } catch {
+      // Browser notification support varies; failed notifications should not break the app.
+    }
+    webReminderTimers.delete(key);
+    scheduleWebReminderTimer(storageKey, ritual, body);
+  }, delay);
+  webReminderTimers.set(key, timer);
+  return key;
+}
+
+async function syncWebRitualReminderNotifications({
+  rituals,
+  enabled,
+  storageKey,
+}: {
+  rituals: Ritual[];
+  enabled: boolean;
+  storageKey: string;
+}) {
+  clearWebReminderTimers(storageKey);
+  if (!enabled || Platform.OS !== 'web') {
+    await AsyncStorage.removeItem(storageKey);
+    return;
+  }
+
+  const notificationCtor = getWebNotificationConstructor();
+  if (!notificationCtor) {
+    await AsyncStorage.removeItem(storageKey);
+    return;
+  }
+  let permission = notificationCtor.permission;
+  if (permission !== 'granted' && permission !== 'denied') {
+    permission = await notificationCtor.requestPermission?.().catch(() => 'denied') ?? 'denied';
+  }
+  if (permission !== 'granted') {
+    await AsyncStorage.removeItem(storageKey);
+    return;
+  }
+
+  const next: ReminderScheduleRecord = {};
+  for (const ritual of rituals) {
+    if (!isValidReminderTime(ritual.reminderTime)) {
+      continue;
+    }
+    const body = ritualReminderBody(ritual.name, ritual.goalAmount, ritual.goalUnit);
+    const notificationId = scheduleWebReminderTimer(storageKey, ritual, body);
+    if (notificationId) {
+      next[ritual.id] = { notificationId, reminderTime: ritual.reminderTime, body };
+    }
+  }
+  await AsyncStorage.setItem(storageKey, JSON.stringify(next));
 }
 
 async function syncRitualReminderNotifications({
@@ -821,8 +976,12 @@ async function syncRitualReminderNotifications({
   } | null;
   storageKey: string;
 }) {
-  const storedRaw = await AsyncStorage.getItem(storageKey);
-  const stored = storedRaw ? JSON.parse(storedRaw) as ReminderScheduleRecord : {};
+  if (Platform.OS === 'web') {
+    await syncWebRitualReminderNotifications({ rituals, enabled, storageKey });
+    return;
+  }
+
+  const stored = await readReminderSchedules(storageKey);
   const cancelStored = async (record?: { notificationId: string }) => {
     if (record?.notificationId && notifications) {
       await notifications.cancelScheduledNotificationAsync(record.notificationId).catch(() => undefined);
@@ -833,6 +992,13 @@ async function syncRitualReminderNotifications({
     await Promise.all(Object.values(stored).map(cancelStored));
     await AsyncStorage.removeItem(storageKey);
     return;
+  }
+
+  if (Platform.OS === 'android') {
+    await notifications.setNotificationChannelAsync?.(REMINDER_NOTIFICATION_CHANNEL_ID, {
+      name: 'Ritual reminders',
+      importance: notifications.AndroidImportance?.DEFAULT ?? 3,
+    }).catch(() => undefined);
   }
 
   const permission = await notifications.getPermissionsAsync().catch(() => ({ granted: false, status: 'denied' }));
@@ -847,20 +1013,13 @@ async function syncRitualReminderNotifications({
     return;
   }
 
-  if (Platform.OS === 'android') {
-    await notifications.setNotificationChannelAsync?.('ritual-reminders', {
-      name: 'Ritual reminders',
-      importance: notifications.AndroidImportance?.DEFAULT ?? 3,
-    }).catch(() => undefined);
-  }
-
   const next: ReminderScheduleRecord = {};
   for (const ritual of rituals) {
-    if (!ritual.reminderTime) {
+    if (!isValidReminderTime(ritual.reminderTime)) {
       await cancelStored(stored[ritual.id]);
       continue;
     }
-    const body = ritualReminderExplanation(ritual.name, ritual.goalAmount, ritual.goalUnit, ritual.reminderTime);
+    const body = ritualReminderBody(ritual.name, ritual.goalAmount, ritual.goalUnit);
     const existing = stored[ritual.id];
     if (existing?.reminderTime === ritual.reminderTime && existing.body === body) {
       next[ritual.id] = existing;
@@ -870,15 +1029,16 @@ async function syncRitualReminderNotifications({
     const [hourRaw, minuteRaw] = ritual.reminderTime.split(':');
     const notificationId = await notifications.scheduleNotificationAsync({
       content: {
-        title: 'Rituals',
+        title: ritualReminderTitle(ritual.name),
         body,
         sound: false,
+        data: { ritualId: ritual.id, screen: 'today' },
       },
       trigger: {
         type: notifications.SchedulableTriggerInputTypes?.DAILY ?? 'daily',
         hour: Number(hourRaw) || 8,
         minute: Number(minuteRaw) || 0,
-        channelId: 'ritual-reminders',
+        channelId: REMINDER_NOTIFICATION_CHANNEL_ID,
       },
     });
     next[ritual.id] = { notificationId, reminderTime: ritual.reminderTime, body };
@@ -1132,13 +1292,41 @@ function dateFromReminderTime(value: string) {
   return date;
 }
 
+function isValidReminderTime(value?: string): value is string {
+  if (!value || !/^\d{2}:\d{2}$/.test(value)) {
+    return false;
+  }
+  const [hour, minute] = value.split(':').map(Number);
+  return Number.isInteger(hour) && Number.isInteger(minute) && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59;
+}
+
+function nextReminderDate(value: string) {
+  const date = dateFromReminderTime(value);
+  if (date.getTime() <= Date.now()) {
+    date.setDate(date.getDate() + 1);
+  }
+  return date;
+}
+
+function ritualReminderBody(name: string, goalAmount: number | undefined, goalUnit: GoalUnit | undefined) {
+  const displayName = name.trim() || 'your ritual';
+  const goal = goalLabel(goalAmount, goalUnit);
+  return goal
+    ? `I want to finish this task today: ${goal}. Tap when ${displayName} is done.`
+    : `I want to finish this task today. Tap when ${displayName} is done.`;
+}
+
+function ritualReminderTitle(name: string) {
+  const displayName = name.trim() || 'Your ritual';
+  return `${displayName} reminder`;
+}
+
 function ritualReminderExplanation(name: string, goalAmount: number | undefined, goalUnit: GoalUnit | undefined, reminderTime?: string) {
   const displayName = name.trim() || 'this ritual';
   if (!reminderTime) {
     return 'Pick a reminder time if you want Rituals to nudge you when this ritual is still open.';
   }
-  const goal = goalLabel(goalAmount, goalUnit);
-  const body = goal ? `Still time for your ${goal} today?` : `Still time to check in with ${displayName} today?`;
+  const body = ritualReminderBody(displayName, goalAmount, goalUnit);
   return `If ${displayName} isn't marked done by ${formatReminderTime(reminderTime)}, Rituals will send a gentle nudge - "${body}"`;
 }
 
@@ -1294,6 +1482,7 @@ function normalizeState(parsed: Partial<SavedFlowState> = {}): SavedFlowState {
     rhythmPoints: typeof parsed.rhythmPoints === 'number' && Number.isFinite(parsed.rhythmPoints) ? Math.max(0, parsed.rhythmPoints) : 0,
     graceHearts: nextGraceHearts,
     onboardingDream: isDreamId(parsed.onboardingDream) ? parsed.onboardingDream : null,
+    tourCompleted: typeof parsed.tourCompleted === 'boolean' ? parsed.tourCompleted : Boolean(parsed.onboardingDream),
     settings: { ...seedSettings, ...(parsed.settings ?? {}), floTone: isFloTone(parsed.settings?.floTone) ? parsed.settings.floTone : seedSettings.floTone },
     insight: parsed.insight ?? '',
     stateDate: today,
@@ -1338,7 +1527,7 @@ function toUsername(value: string) {
 function authAccountFromUser(user: SupabaseUser, profile?: Partial<SupabaseProfile> | null): AuthAccount {
   const email = user.email ?? profile?.email ?? '';
   const name = profile?.name || user.user_metadata?.full_name || '';
-  const username = name || profile?.username || user.user_metadata?.username || email.split('@')[0] || 'Rituals user';
+  const username = profile?.username || user.user_metadata?.username || email.split('@')[0] || name || 'ritual_user';
   const profileComplete = profile?.profile_complete ?? false;
   const profileSetupSkipped = profile?.profile_setup_skipped ?? false;
   return {
@@ -1361,16 +1550,140 @@ function authAccountFromUser(user: SupabaseUser, profile?: Partial<SupabaseProfi
 
 const buildAuthAccountFromUser = authAccountFromUser;
 
+function shouldPromptProfileSetup(account: AuthAccount) {
+  return account.profileComplete === false && !account.profileSetupSkipped;
+}
+
+function profileSetupSourceForAccount(account: AuthAccount, source: 'create' | 'profile' = 'create') {
+  return shouldPromptProfileSetup(account) ? source : null;
+}
+
+function authParamsFromUrl(url: string) {
+  const params = new URLSearchParams();
+  const appendParams = (raw: string | null | undefined) => {
+    if (!raw) {
+      return;
+    }
+    const source = raw.startsWith('?') || raw.startsWith('#') ? raw.slice(1) : raw;
+    if (!source) {
+      return;
+    }
+    new URLSearchParams(source).forEach((value, key) => {
+      params.set(key, value);
+    });
+  };
+
+  try {
+    const parsed = new URL(url);
+    appendParams(parsed.search);
+    appendParams(parsed.hash);
+  } catch {
+    const queryIndex = url.indexOf('?');
+    const hashIndex = url.indexOf('#');
+    if (queryIndex >= 0) {
+      appendParams(url.slice(queryIndex + 1, hashIndex >= 0 ? hashIndex : undefined));
+    }
+    if (hashIndex >= 0) {
+      appendParams(url.slice(hashIndex + 1));
+    }
+  }
+
+  return params;
+}
+
+function isSupabaseAuthRedirectUrl(url: string) {
+  const params = authParamsFromUrl(url);
+  return url.startsWith(`${APP_SCHEME}:`)
+    || params.has('access_token')
+    || params.has('refresh_token')
+    || params.has('code')
+    || params.has('error')
+    || params.has('error_description');
+}
+
+async function createSessionFromAuthUrl(url: string): Promise<SupabaseSession | null> {
+  if (!supabase || !isSupabaseAuthRedirectUrl(url)) {
+    return null;
+  }
+
+  const params = authParamsFromUrl(url);
+  const authError = params.get('error_description') || params.get('error') || params.get('error_code');
+  if (authError) {
+    throw new Error(authError);
+  }
+
+  const code = params.get('code');
+  if (code) {
+    const { data, error } = await supabase.auth.exchangeCodeForSession(code);
+    if (error) {
+      throw error;
+    }
+    return data.session ?? null;
+  }
+
+  const accessToken = params.get('access_token');
+  const refreshToken = params.get('refresh_token');
+  if (!accessToken || !refreshToken) {
+    return null;
+  }
+
+  const { data, error } = await supabase.auth.setSession({
+    access_token: accessToken,
+    refresh_token: refreshToken,
+  });
+  if (error) {
+    throw error;
+  }
+  return data.session ?? null;
+}
+
 function isAuthNetworkError(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error ?? '');
+  const message = readableErrorMessage(error);
   return /fetch failed|network request failed|sslhandshake|certificate|trust anchor|failed to fetch/i.test(message);
 }
 
-function cleanAuthError(error: unknown, fallback: string) {
-  if (isAuthNetworkError(error)) {
-    return 'Secure connection to Supabase failed on this device, so the account was not created and no email was sent. Check the device date/time, update Android System WebView, or use the Vercel web app, then try again.';
+function readableErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message) {
+    return error.message;
   }
-  return error instanceof Error && error.message ? error.message : fallback;
+  if (typeof error === 'string') {
+    return error;
+  }
+  if (error && typeof error === 'object') {
+    const record = error as Record<string, unknown>;
+    const parts = ['message', 'error_description', 'details', 'hint', 'code']
+      .map((key) => record[key])
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .map((value) => value.trim());
+    const unique = Array.from(new Set(parts));
+    if (unique.length) {
+      return unique.join(' ');
+    }
+  }
+  return '';
+}
+
+function cleanAuthError(error: unknown, fallback: string, networkFallback?: string) {
+  const message = readableErrorMessage(error);
+  if (isAuthNetworkError(error)) {
+    return networkFallback ?? 'Secure connection to Supabase failed on this device. Check the device date/time, update Android System WebView or Chrome, try another network, then try again.';
+  }
+  return message || fallback;
+}
+
+function cleanDatabaseError(error: unknown, fallback: string) {
+  const message = readableErrorMessage(error);
+  if (isAuthNetworkError(error)) {
+    return 'Secure connection to Supabase failed on this device. Check automatic date/time, update Android System WebView or Chrome, try another network, then try again.';
+  }
+  if (/schema cache|column .* does not exist|could not find .* column|undefined column/i.test(message)) {
+    return `${message} Run the latest Supabase migrations before testing this build.`;
+  }
+  return message || fallback;
+}
+
+function isProfileUsernameConflict(error: unknown) {
+  return /profiles_username_unique_idx|duplicate key|username/i.test(readableErrorMessage(error));
 }
 
 function localAuthAccount(username: string, password: string, email: string, name?: string): AuthAccount {
@@ -1401,28 +1714,38 @@ async function upsertProfileForUser(user: SupabaseUser, username: string, name: 
     return null;
   }
 
-  const { data, error } = await supabase
+  const existingProfile = await lookupProfileForUser(supabase, user).catch(() => null);
+  const safeUsername = existingProfile?.username || username;
+  const profilePayload = {
+    id: user.id,
+    username: safeUsername,
+    name,
+    email,
+    profile_complete: existingProfile?.profile_complete ?? false,
+    profile_setup_skipped: existingProfile?.profile_setup_skipped ?? false,
+    avatar_emoji: existingProfile?.avatar_emoji || '🙂',
+  };
+
+  let result = await supabase
     .from('profiles')
-    .upsert(
-      {
-        id: user.id,
-        username,
-        name,
-        email,
-        profile_complete: false,
-        profile_setup_skipped: false,
-        avatar_emoji: '🙂',
-      },
-      { onConflict: 'id' },
-    )
+    .upsert(profilePayload, { onConflict: 'id' })
     .select(PROFILE_SELECT)
     .single();
 
-  if (error) {
-    throw error;
+  if (result.error && isProfileUsernameConflict(result.error)) {
+    const fallbackUsername = `${toUsername(username)}_${user.id.replace(/-/g, '').slice(0, 8)}`;
+    result = await supabase
+      .from('profiles')
+      .upsert({ ...profilePayload, username: fallbackUsername }, { onConflict: 'id' })
+      .select(PROFILE_SELECT)
+      .single();
   }
 
-  return data as SupabaseProfile;
+  if (result.error) {
+    throw new Error(cleanDatabaseError(result.error, 'Unable to create profile.'));
+  }
+
+  return result.data as SupabaseProfile;
 }
 
 async function saveProfileSetupForAccount(
@@ -1431,7 +1754,7 @@ async function saveProfileSetupForAccount(
 ) {
   const nextAccount: AuthAccount = {
     ...account,
-    username: profile.name?.trim() || account.name || account.username,
+    username: account.username,
     name: profile.name?.trim() || account.name || account.username,
     age: profile.age ?? account.age,
     city: profile.city?.trim() || account.city,
@@ -1447,12 +1770,11 @@ async function saveProfileSetupForAccount(
     return nextAccount;
   }
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('profiles')
     .upsert(
       {
         id: account.id,
-        username: account.username,
         name: nextAccount.name,
         email: account.email,
         age: nextAccount.age ?? null,
@@ -1465,13 +1787,29 @@ async function saveProfileSetupForAccount(
         profile_setup_skipped: nextAccount.profileSetupSkipped,
       },
       { onConflict: 'id' },
-    );
+    )
+    .select(PROFILE_SELECT)
+    .single();
 
-  if (error) {
-    throw error;
+  if (error || !data) {
+    throw new Error(cleanDatabaseError(error, 'Unable to save profile.'));
   }
 
-  return nextAccount;
+  const saved = data as SupabaseProfile;
+  return {
+    ...nextAccount,
+    username: saved.username || nextAccount.username,
+    name: saved.name || nextAccount.name,
+    email: saved.email || nextAccount.email,
+    age: typeof saved.age === 'number' ? saved.age : nextAccount.age,
+    city: saved.city ?? nextAccount.city,
+    mobile: saved.mobile ?? nextAccount.mobile,
+    countryCode: saved.country_code || nextAccount.countryCode || DEFAULT_COUNTRY_CODE,
+    gender: saved.gender ?? nextAccount.gender,
+    habitFocus: saved.habit_focus ?? nextAccount.habitFocus,
+    profileComplete: saved.profile_complete ?? nextAccount.profileComplete,
+    profileSetupSkipped: saved.profile_setup_skipped ?? nextAccount.profileSetupSkipped,
+  };
 }
 
 async function resolveEmailForIdentifier(identifier: string) {
@@ -1725,12 +2063,12 @@ function useEntranceAnimation(trigger: string | number, reduceMotion: boolean) {
 
 function AppRoot() {
   const [fontsLoaded] = useFonts({
-    PlusJakartaSans_400Regular,
-    PlusJakartaSans_500Medium,
-    PlusJakartaSans_600SemiBold,
     Fraunces_400Regular,
     Fraunces_500Medium,
     Fraunces_600SemiBold,
+    PlusJakartaSans_400Regular,
+    PlusJakartaSans_500Medium,
+    PlusJakartaSans_600SemiBold,
   });
   const reduceMotion = useReducedMotion();
   const [showSplash, setShowSplash] = useState(true);
@@ -1999,6 +2337,7 @@ function AuthenticatedApp() {
   const [account, setAccount] = useState(DEFAULT_AUTH_ACCOUNT);
   const [signedIn, setSignedIn] = useState(false);
   const [profileSetupSource, setProfileSetupSource] = useState<'create' | 'profile' | null>(null);
+  const [authGateError, setAuthGateError] = useState('');
   const reduceMotion = useReducedMotion();
 
   useEffect(() => {
@@ -2014,7 +2353,7 @@ function AuthenticatedApp() {
             if (mounted) {
               setAccount(nextAccount);
               setSignedIn(true);
-              setProfileSetupSource(null);
+              setProfileSetupSource(profileSetupSourceForAccount(nextAccount));
               setReady(true);
             }
             return;
@@ -2029,7 +2368,7 @@ function AuthenticatedApp() {
             setAccount(parsed.account);
             setSignedIn(true);
             if (parsed.account.profileComplete === false && !parsed.account.profileSetupSkipped) {
-              setProfileSetupSource(null);
+              setProfileSetupSource(profileSetupSourceForAccount(parsed.account));
             }
           }
         }
@@ -2045,7 +2384,7 @@ function AuthenticatedApp() {
         setAccount(parsed.account);
         setSignedIn(parsed.signedIn);
         if (parsed.signedIn && parsed.account.profileComplete === false && !parsed.account.profileSetupSkipped) {
-          setProfileSetupSource(null);
+          setProfileSetupSource(profileSetupSourceForAccount(parsed.account));
         }
         setReady(true);
       }
@@ -2071,7 +2410,7 @@ function AuthenticatedApp() {
       if (mounted) {
         setAccount(nextAccount);
         setSignedIn(true);
-        setProfileSetupSource(null);
+        setProfileSetupSource(profileSetupSourceForAccount(nextAccount));
       }
     }).data.subscription;
 
@@ -2101,6 +2440,52 @@ function AuthenticatedApp() {
     ).catch(() => undefined);
   }, []);
 
+  useEffect(() => {
+    if (!supabase) {
+      return undefined;
+    }
+
+    let mounted = true;
+    const applyAuthUrl = async (url: string | null) => {
+      if (!url || !isSupabaseAuthRedirectUrl(url)) {
+        return;
+      }
+      try {
+        const session = await createSessionFromAuthUrl(url);
+        if (!session?.user || !mounted) {
+          return;
+        }
+        const profile = await getProfileForUser(session.user);
+        const nextAccount = buildAuthAccountFromUser(session.user, profile);
+        if (!mounted) {
+          return;
+        }
+        setAuthGateError('');
+        setAccount(nextAccount);
+        setSignedIn(true);
+        setProfileSetupSource(profileSetupSourceForAccount(nextAccount));
+        setReady(true);
+        saveLocalAuth(nextAccount, true);
+        ExpoLinking.clearInitialURL?.();
+      } catch (error) {
+        if (mounted) {
+          setAuthGateError(cleanAuthError(error, 'Unable to finish email confirmation.'));
+          setReady(true);
+        }
+      }
+    };
+
+    ExpoLinking.getInitialURL().then(applyAuthUrl).catch(() => undefined);
+    const subscription = ExpoLinking.addEventListener('url', ({ url }) => {
+      applyAuthUrl(url).catch(() => undefined);
+    });
+
+    return () => {
+      mounted = false;
+      subscription.remove();
+    };
+  }, [saveLocalAuth]);
+
   const finishProfileSetup = useCallback(async (profile: ProfileSetupData) => {
     const nextAccount = await saveProfileSetupForAccount(account, {
       ...profile,
@@ -2110,9 +2495,7 @@ function AuthenticatedApp() {
     setAccount(nextAccount);
     setSignedIn(true);
     setProfileSetupSource(null);
-    if (!supabase) {
-      saveLocalAuth(nextAccount, true);
-    }
+    saveLocalAuth(nextAccount, true);
   }, [account, saveLocalAuth]);
 
   const skipProfileSetup = useCallback(async () => {
@@ -2123,9 +2506,7 @@ function AuthenticatedApp() {
     setAccount(nextAccount);
     setSignedIn(true);
     setProfileSetupSource(null);
-    if (!supabase) {
-      saveLocalAuth(nextAccount, true);
-    }
+    saveLocalAuth(nextAccount, true);
   }, [account, saveLocalAuth]);
 
   const backFromProfileSetup = useCallback(() => {
@@ -2148,10 +2529,12 @@ function AuthenticatedApp() {
     return (
       <AuthGate
         account={account}
+        externalError={authGateError}
         onLogin={(nextAccount) => {
           setAccount(nextAccount);
           setSignedIn(true);
-          setProfileSetupSource(null);
+          setAuthGateError('');
+          setProfileSetupSource(profileSetupSourceForAccount(nextAccount));
           saveLocalAuth(nextAccount, true);
         }}
         onCreate={(nextAccount) => {
@@ -2162,7 +2545,8 @@ function AuthenticatedApp() {
           };
           setAccount(createdAccount);
           setSignedIn(true);
-          setProfileSetupSource(null);
+          setAuthGateError('');
+          setProfileSetupSource(profileSetupSourceForAccount(createdAccount));
           saveLocalAuth(createdAccount, true);
         }}
         onResetPassword={(nextAccount) => {
@@ -2210,11 +2594,13 @@ function AuthenticatedApp() {
 
 function AuthGate({
   account,
+  externalError,
   onLogin,
   onCreate,
   onResetPassword,
 }: {
   account: AuthAccount;
+  externalError?: string;
   onLogin: (account: AuthAccount) => void;
   onCreate: (account: AuthAccount) => void;
   onResetPassword: (account: AuthAccount) => void;
@@ -2251,6 +2637,14 @@ function AuthGate({
     : undefined;
   const emailIsInvalid = email.length > 0 && !isValidEmail(email);
   const strength = getPasswordStrength(password);
+  const confirmPasswordMismatch = confirmPassword.length > 0 && password !== confirmPassword;
+
+  useEffect(() => {
+    if (externalError) {
+      setError(externalError);
+      setMessage('');
+    }
+  }, [externalError]);
 
   const clearFeedback = () => {
     setError('');
@@ -2296,7 +2690,13 @@ function AuthGate({
             onLogin(account);
             return;
           }
-          setError(signInError?.message ?? 'Email/username or password is incorrect.');
+          setError(signInError
+            ? cleanAuthError(
+                signInError,
+                'Email/username or password is incorrect.',
+                'Secure connection to Supabase failed on this device, so sign-in could not finish. Check automatic date/time, update Android System WebView or Chrome, try another network, then try again.',
+              )
+            : 'Email/username or password is incorrect.');
           return;
         }
         const profile = await getProfileForUser(data.user);
@@ -2306,7 +2706,11 @@ function AuthGate({
           onLogin(account);
           return;
         }
-        setError(cleanAuthError(authError, 'Unable to sign in.'));
+        setError(cleanAuthError(
+          authError,
+          'Unable to sign in.',
+          'Secure connection to Supabase failed on this device, so sign-in could not finish. Check automatic date/time, update Android System WebView or Chrome, try another network, then try again.',
+        ));
       } finally {
         setSubmitting(false);
       }
@@ -2336,6 +2740,14 @@ function AuthGate({
       setError('Use a stronger password before creating an account.');
       return;
     }
+    if (!confirmPassword) {
+      setError('Confirm your password.');
+      return;
+    }
+    if (password !== confirmPassword) {
+      setError('Passwords do not match.');
+      return;
+    }
     if (!termsAccepted) {
       setError('Agree to the Terms of Service and Privacy Policy to continue.');
       return;
@@ -2358,7 +2770,11 @@ function AuthGate({
         const responseSession = data?.session ?? null;
 
         if (signUpError) {
-          setError(signUpError.message || 'Unable to create account.');
+          setError(cleanAuthError(
+            signUpError,
+            'Unable to create account.',
+            'Secure connection to Supabase failed on this device, so the account was not created and no email was sent. Check automatic date/time, update Android System WebView or Chrome, try another network, then try again.',
+          ));
           return;
         }
 
@@ -2368,9 +2784,11 @@ function AuthGate({
         }
 
         if (responseSession) {
-          await upsertProfileForUser(responseUser, username, trimmedName, trimmedEmail);
-          await supabase.auth.signOut();
+          const profile = await upsertProfileForUser(responseUser, username, trimmedName, trimmedEmail);
+          onCreate({ ...buildAuthAccountFromUser(responseUser, profile), password });
+          return;
         }
+
         setMessage('Account created. Check your email to confirm, then sign in.');
         setMode('signIn');
         setIdentifier(trimmedEmail);
@@ -2380,7 +2798,11 @@ function AuthGate({
         setConfirmPassword('');
         setTermsAccepted(false);
       } catch (authError) {
-        setError(cleanAuthError(authError, 'Unable to create account.'));
+        setError(cleanAuthError(
+          authError,
+          'Unable to create account.',
+          'Secure connection to Supabase failed on this device, so the account was not created and no email was sent. Check automatic date/time, update Android System WebView or Chrome, try another network, then try again.',
+        ));
       } finally {
         setSubmitting(false);
       }
@@ -2405,14 +2827,22 @@ function AuthGate({
           authRedirectUrl ? { redirectTo: authRedirectUrl } : undefined,
         );
         if (resetError) {
-          setError(resetError.message);
+          setError(cleanAuthError(
+            resetError,
+            'Unable to send reset email.',
+            'Secure connection to Supabase failed on this device, so the reset email was not sent. Check automatic date/time, update Android System WebView or Chrome, try another network, then try again.',
+          ));
           return;
         }
         setMode('signIn');
         setIdentifier(resetEmail);
         setMessage('Password reset email sent. Open the link from your inbox.');
       } catch (authError) {
-        setError(authError instanceof Error ? authError.message : 'Unable to send reset email.');
+        setError(cleanAuthError(
+          authError,
+          'Unable to send reset email.',
+          'Secure connection to Supabase failed on this device, so the reset email was not sent. Check automatic date/time, update Android System WebView or Chrome, try another network, then try again.',
+        ));
       } finally {
         setSubmitting(false);
       }
@@ -2505,7 +2935,7 @@ function AuthGate({
                     <>
                       <AuthInput
                         icon={User}
-                        label="Username"
+                        label="Name"
                         value={fullName}
                         onChangeText={(value) => {
                           setFullName(value);
@@ -2545,6 +2975,21 @@ function AuthGate({
                         )}
                       />
                       <PasswordStrengthMeter strength={strength} />
+                      <AuthInput
+                        icon={Lock}
+                        label="Confirm password"
+                        value={confirmPassword}
+                        onChangeText={(value) => {
+                          setConfirmPassword(value);
+                          clearFeedback();
+                        }}
+                        placeholder="Re-enter password"
+                        secureTextEntry={!passwordVisible}
+                        returnKeyType="done"
+                        onSubmitEditing={submit}
+                        error={confirmPasswordMismatch}
+                        helperText={confirmPasswordMismatch ? 'Passwords do not match' : undefined}
+                      />
                       <TermsAgreement
                         checked={termsAccepted}
                         onToggle={() => {
@@ -2553,7 +2998,7 @@ function AuthGate({
                         }}
                         onOpenTerms={() => setActivePolicy('terms')}
                         onOpenPrivacy={() => setActivePolicy('privacy')}
-                        required={!termsAccepted && Boolean(error)}
+                        required={!termsAccepted && error.includes('Terms of Service')}
                       />
                     </>
                   ) : (
@@ -2619,7 +3064,12 @@ function AuthGate({
                   {error ? <Text style={styles.authError}>{error}</Text> : null}
                   {message ? <Text style={styles.authMessage}>{message}</Text> : null}
 
-                  <PressScale reduceMotion={reduceMotion} onPress={submit} style={styles.authPrimaryButton}>
+                  <PressScale
+                    reduceMotion={reduceMotion}
+                    disabled={submitting}
+                    onPress={submit}
+                    style={[styles.authPrimaryButton, submitting && styles.authPrimaryButtonDisabled]}
+                  >
                     <Text style={styles.authPrimaryText}>
                       {submitting ? 'Please wait' : isCreate ? 'Create account' : isReset ? usesSupabaseAuth ? 'Send reset link' : 'Update password' : 'Sign in'}
                     </Text>
@@ -2664,13 +3114,15 @@ function isValidEmail(value: string) {
 
 function OnboardingDreamFlow({
   reduceMotion,
+  onSkip,
   onComplete,
 }: {
   reduceMotion: boolean;
+  onSkip: () => void;
   onComplete: (
     dream: DreamId,
     starters: Array<{ name: string; icon: string; paletteKey: PaletteKey; goalAmount?: number; goalUnit?: GoalUnit; reminderTime: string }>,
-  ) => void;
+  ) => void | Promise<void>;
 }) {
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
@@ -2678,9 +3130,17 @@ function OnboardingDreamFlow({
   const [step, setStep] = useState<OnboardingStep>('dream');
   const [selectedDream, setSelectedDream] = useState<DreamId | null>(null);
   const [enabled, setEnabled] = useState<Record<string, boolean>>({});
+  const [submitting, setSubmitting] = useState(false);
   const selectedOption = dreamOptions.find((option) => option.id === selectedDream) ?? null;
   const starters = selectedDream ? starterRitualsByDream[selectedDream] : [];
   const selectedStarters = starters.filter((starter) => enabled[starter.name] !== false);
+  const stepIndex = step === 'dream' ? 0 : 1;
+  const title = step === 'dream'
+    ? "What's your ritual dream?"
+    : `Starter rituals for "${selectedOption?.title ?? 'your dream'}"`;
+  const subtitle = step === 'dream'
+    ? "Pick a direction or skip. You can change everything later."
+    : 'These become your real starting rituals. Keep what fits.';
   const contentMaxWidth = isTablet
     ? responsiveMaxWidth(width, PROFILE_SETUP_MAX_WIDTH, 28)
     : undefined;
@@ -2695,6 +3155,24 @@ function OnboardingDreamFlow({
   const continueToStarters = () => {
     if (selectedDream) {
       setStep('starters');
+    }
+  };
+
+  const goBack = () => {
+    if (step === 'starters') {
+      setStep('dream');
+    }
+  };
+
+  const submitStarters = async () => {
+    if (!selectedDream || !selectedStarters.length || submitting) {
+      return;
+    }
+    try {
+      setSubmitting(true);
+      await onComplete(selectedDream, selectedStarters);
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -2713,19 +3191,27 @@ function OnboardingDreamFlow({
             },
           ]}
         >
+          <View style={styles.onboardingTopBar}>
+            <View />
+            <Pressable accessibilityRole="button" onPress={onSkip} hitSlop={8}>
+              <Text style={styles.onboardingSkip}>Skip</Text>
+            </Pressable>
+          </View>
+
           <View style={styles.onboardingProgress}>
-            <LinearGradient colors={[colors.blue1, '#2E8FE8']} style={styles.onboardingProgressDot} />
-            <View style={[styles.onboardingProgressDot, step === 'starters' ? styles.onboardingProgressDotActive : styles.onboardingProgressDotEmpty]} />
+            {[0, 1].map((index) => (
+              index <= stepIndex ? (
+                <LinearGradient key={index} colors={[colors.blue1, '#2E8FE8']} style={styles.onboardingProgressDot} />
+              ) : (
+                <View key={index} style={[styles.onboardingProgressDot, styles.onboardingProgressDotEmpty]} />
+              )
+            ))}
           </View>
 
           <View style={styles.onboardingHeader}>
             <LogoMark size={58} reduceMotion={reduceMotion} />
-            <Text style={styles.onboardingTitle}>
-              {step === 'dream' ? "What's your ritual dream?" : `Starter rituals for "${selectedOption?.title ?? 'your dream'}"`}
-            </Text>
-            <Text style={styles.onboardingSubtitle}>
-              {step === 'dream' ? "We'll shape your first rituals around this." : 'These become your real starting rituals. Keep what fits.'}
-            </Text>
+            <Text style={styles.onboardingTitle}>{title}</Text>
+            <Text style={styles.onboardingSubtitle}>{subtitle}</Text>
           </View>
 
           {step === 'dream' ? (
@@ -2813,16 +3299,16 @@ function OnboardingDreamFlow({
               </View>
 
               <View style={styles.modalActions}>
-                <Pressable accessibilityRole="button" onPress={() => setStep('dream')} style={styles.btnSecondary}>
+                <Pressable accessibilityRole="button" onPress={goBack} style={styles.btnSecondary}>
                   <Text style={styles.btnSecondaryText}>Back</Text>
                 </Pressable>
                 <Pressable
                   accessibilityRole="button"
-                  disabled={!selectedDream || !selectedStarters.length}
-                  onPress={() => selectedDream && onComplete(selectedDream, selectedStarters)}
-                  style={[styles.btnPrimary, (!selectedDream || !selectedStarters.length) && styles.btnPrimaryDisabled]}
+                  disabled={!selectedDream || !selectedStarters.length || submitting}
+                  onPress={submitStarters}
+                  style={[styles.btnPrimary, (!selectedDream || !selectedStarters.length || submitting) && styles.btnPrimaryDisabled]}
                 >
-                  <Text style={styles.btnPrimaryText}>Start my rituals</Text>
+                  <Text style={styles.btnPrimaryText}>{submitting ? 'Saving' : 'Start my rituals'}</Text>
                 </Pressable>
               </View>
             </>
@@ -2861,6 +3347,7 @@ function ProfileSetupScreen({
   const contentMaxWidth = isTablet
     ? responsiveMaxWidth(width, PROFILE_SETUP_MAX_WIDTH, profileHorizontalPadding)
     : undefined;
+  const stackProfileFields = width < 360;
   const parsedAge = Number(age);
   const nameValid = name.trim().length >= 2;
   const ageValid = Number.isInteger(parsedAge) && parsedAge >= 13 && parsedAge <= 120;
@@ -2890,7 +3377,7 @@ function ProfileSetupScreen({
         habitFocus,
       });
     } catch (profileError) {
-      setError(profileError instanceof Error ? profileError.message : 'Unable to save profile.');
+      setError(cleanDatabaseError(profileError, 'Unable to save profile.'));
     } finally {
       setSubmitting(false);
     }
@@ -2905,7 +3392,7 @@ function ProfileSetupScreen({
       setError('');
       await onSkip();
     } catch (profileError) {
-      setError(profileError instanceof Error ? profileError.message : 'Unable to skip setup.');
+      setError(cleanDatabaseError(profileError, 'Unable to skip setup.'));
     } finally {
       setSubmitting(false);
     }
@@ -2952,6 +3439,17 @@ function ProfileSetupScreen({
             </View>
 
             <GradientCard style={styles.profileSetupCard}>
+              <View style={styles.profileCardHeader}>
+                <View style={styles.profileCardHeaderIcon}>
+                  <User size={16} color={colors.blue1} strokeWidth={2.5} />
+                </View>
+                <View style={styles.profileCardHeaderCopy}>
+                  <Text style={styles.profileCardHeaderTitle}>Personal profile</Text>
+                  <Text style={styles.profileCardHeaderText}>Used only for your rituals and reminders</Text>
+                </View>
+                <Text style={styles.profileCardHeaderStep}>2/3</Text>
+              </View>
+
               <FloatingProfileInput
                 icon={User}
                 label="Full name"
@@ -2966,7 +3464,7 @@ function ProfileSetupScreen({
                 helperText={name.length > 0 && !nameValid ? 'Enter your full name' : undefined}
               />
 
-              <View style={styles.profileTwoColumn}>
+              <View style={[styles.profileTwoColumn, stackProfileFields && styles.profileTwoColumnStacked]}>
                 <FloatingProfileInput
                   icon={CalendarDays}
                   label="Age"
@@ -2979,7 +3477,6 @@ function ProfileSetupScreen({
                   keyboardType="number-pad"
                   returnKeyType="next"
                   error={ageInvalid}
-                  helperText={ageInvalid ? 'Age 13-120' : undefined}
                   style={styles.profileHalfField}
                 />
                 <FloatingProfileInput
@@ -3046,7 +3543,7 @@ function ProfileSetupScreen({
                 reduceMotion={reduceMotion}
                 disabled={!formValid || submitting}
                 onPress={submit}
-                style={[styles.authPrimaryButton, styles.profileContinueButton, (!formValid || submitting) && styles.authPrimaryButtonDisabled]}
+                style={[styles.authPrimaryButton, styles.profileContinueButton, formValid && styles.profileContinueButtonReady, (!formValid || submitting) && styles.authPrimaryButtonDisabled]}
               >
                 <Text style={styles.authPrimaryText}>{submitting ? 'Saving' : 'Continue'}</Text>
                 <ArrowRight size={16} color="#FFFFFF" strokeWidth={2.7} />
@@ -3237,8 +3734,9 @@ function ProfileChoiceGroup({
               onPress={() => onChange(option)}
               style={[styles.profileChoiceChip, selected && styles.profileChoiceChipSelected]}
             >
+              {selected ? <LinearGradient colors={['rgba(79,168,255,0.18)', 'rgba(255,255,255,0.92)']} style={StyleSheet.absoluteFill} /> : null}
               <View style={[styles.profileChoiceDot, selected && styles.profileChoiceDotSelected]} />
-              <Text style={[styles.profileChoiceText, selected && styles.profileChoiceTextSelected]}>{option}</Text>
+              <Text numberOfLines={1} style={[styles.profileChoiceText, selected && styles.profileChoiceTextSelected]}>{option}</Text>
             </Pressable>
           );
         })}
@@ -3666,6 +4164,8 @@ function FlowApp({
   const [rhythmPoints, setRhythmPoints] = useState(defaultState.rhythmPoints);
   const [graceHearts, setGraceHearts] = useState(defaultState.graceHearts);
   const [onboardingDream, setOnboardingDream] = useState<DreamId | null>(defaultState.onboardingDream ?? null);
+  const [tourCompleted, setTourCompleted] = useState(Boolean(defaultState.tourCompleted));
+  const [tourStepIndex, setTourStepIndex] = useState(0);
   const [settings, setSettings] = useState(defaultState.settings);
   const [insight, setInsight] = useState(defaultState.insight);
   const [stateDate, setStateDate] = useState(defaultState.stateDate ?? todayIso());
@@ -3681,6 +4181,7 @@ function FlowApp({
   const isTablet = width >= TABLET_MIN_WIDTH;
   const appHorizontalPadding = isTablet ? 28 : 20;
   const storageKey = useMemo(() => (userId ? `${STORAGE_KEY}:${userId}` : STORAGE_KEY), [userId]);
+  const reminderStorageKey = useMemo(() => `${REMINDER_NOTIFICATION_STORAGE_KEY}:${userId ?? 'local'}`, [userId]);
   const canUseRemote = Boolean(supabase && userId && !userId.startsWith('local-'));
 
   useEffect(() => {
@@ -3700,6 +4201,8 @@ function FlowApp({
       setRhythmPoints(state.rhythmPoints);
       setGraceHearts(state.graceHearts);
       setOnboardingDream(state.onboardingDream ?? null);
+      setTourCompleted(Boolean(state.tourCompleted));
+      setTourStepIndex(0);
       setSettings(state.settings);
       setInsight(state.insight);
       setStateDate(state.stateDate ?? todayIso());
@@ -3773,12 +4276,13 @@ function FlowApp({
       rhythmPoints,
       graceHearts,
       onboardingDream,
+      tourCompleted,
       settings,
       insight,
       stateDate,
     };
     AsyncStorage.setItem(storageKey, JSON.stringify(state)).catch(() => undefined);
-  }, [baseDoneFromOtherHabits, checkins, graceHearts, hydrated, insight, onboardingDream, overallStreak, rhythmPoints, rituals, settings, stateDate, storageKey, totalActiveRituals]);
+  }, [baseDoneFromOtherHabits, checkins, graceHearts, hydrated, insight, onboardingDream, overallStreak, rhythmPoints, rituals, settings, stateDate, storageKey, totalActiveRituals, tourCompleted]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -3798,6 +4302,7 @@ function FlowApp({
         rhythmPoints,
         graceHearts,
         onboardingDream,
+        tourCompleted,
         settings,
         insight,
         stateDate,
@@ -3810,6 +4315,7 @@ function FlowApp({
       setRhythmPoints(next.rhythmPoints);
       setGraceHearts(next.graceHearts);
       setOnboardingDream(next.onboardingDream ?? null);
+      setTourCompleted(Boolean(next.tourCompleted));
       setSettings(next.settings);
       setInsight(next.insight);
       setStateDate(next.stateDate ?? todayIso());
@@ -3826,7 +4332,7 @@ function FlowApp({
       clearInterval(timer);
       subscription.remove();
     };
-  }, [baseDoneFromOtherHabits, checkins, graceHearts, hydrated, insight, onboardingDream, overallStreak, rhythmPoints, rituals, settings, stateDate, totalActiveRituals]);
+  }, [baseDoneFromOtherHabits, checkins, graceHearts, hydrated, insight, onboardingDream, overallStreak, rhythmPoints, rituals, settings, stateDate, totalActiveRituals, tourCompleted]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -3836,9 +4342,9 @@ function FlowApp({
       rituals,
       enabled: settings.pushNotifications,
       notifications: notificationsModule as never,
-      storageKey: REMINDER_NOTIFICATION_STORAGE_KEY,
+      storageKey: reminderStorageKey,
     }).catch(() => undefined);
-  }, [hydrated, rituals, settings.pushNotifications]);
+  }, [hydrated, reminderStorageKey, rituals, settings.pushNotifications]);
 
   const doneCount = useMemo(
     () => baseDoneFromOtherHabits + rituals.filter((ritual) => ritual.doneToday).length,
@@ -3991,13 +4497,19 @@ function FlowApp({
         .order('created_at', { ascending: true });
 
       if (insertError) {
-        showToast(`Database save failed: ${insertError.message}`);
+        const message = cleanDatabaseError(insertError, 'Unable to save starter rituals.');
+        showToast(`Database save failed: ${message}`);
+        throw new Error(message);
       } else if (data?.length) {
         nextRituals = nextRituals.map((ritual, index) => ({
           ...ritual,
           id: data[index]?.id ?? ritual.id,
           createdAt: data[index]?.created_at ? Date.parse(data[index].created_at) : ritual.createdAt,
         }));
+      } else {
+        const message = 'Unable to save starter rituals.';
+        showToast(`Database save failed: ${message}`);
+        throw new Error(message);
       }
     }
 
@@ -4014,6 +4526,27 @@ function FlowApp({
     impact();
     setTimeout(() => setNewRitualId(null), 650);
   };
+
+  const skipStarterOnboarding = () => {
+    setOnboardingDream('maintain');
+    setStarterOnboardingAllowed(false);
+    setActiveTab('today');
+    showToast('You can add rituals anytime');
+    impact();
+  };
+
+  const finishTodayTour = useCallback(() => {
+    setTourCompleted(true);
+    setTourStepIndex(0);
+  }, []);
+
+  const nextTodayTourStep = useCallback(() => {
+    if (tourStepIndex >= todayTourSteps.length - 1) {
+      finishTodayTour();
+      return;
+    }
+    setTourStepIndex((current) => current + 1);
+  }, [finishTodayTour, tourStepIndex]);
 
   const toggleRitual = (ritualId: string, x: number, y: number) => {
     const target = rituals.find((ritual) => ritual.id === ritualId);
@@ -4275,6 +4808,16 @@ function FlowApp({
     }
   };
 
+  const logout = useCallback(() => {
+    syncRitualReminderNotifications({
+      rituals,
+      enabled: false,
+      notifications: notificationsModule as never,
+      storageKey: reminderStorageKey,
+    }).catch(() => undefined);
+    onLogout();
+  }, [onLogout, reminderStorageKey, rituals]);
+
   const generateInsight = (coachText?: string) => {
     if (!rituals.length) {
       showToast('Create a ritual first');
@@ -4294,6 +4837,12 @@ function FlowApp({
   const contentMaxWidth = isTablet
     ? responsiveMaxWidth(width, APP_CONTENT_MAX_WIDTH, appHorizontalPadding)
     : undefined;
+  const showTodayTour = hydrated
+    && activeTab === 'today'
+    && !tourCompleted
+    && !addOpen
+    && !editingRitual
+    && !coachOpen;
 
   if (!hydrated) {
     return (
@@ -4310,7 +4859,8 @@ function FlowApp({
     return (
       <OnboardingDreamFlow
         reduceMotion={reduceMotion}
-        onComplete={(dream, starters) => completeOnboarding(dream, starters).catch(() => showToast('Unable to save starter rituals'))}
+        onSkip={skipStarterOnboarding}
+        onComplete={(dream, starters) => completeOnboarding(dream, starters).catch(() => undefined)}
       />
     );
   }
@@ -4376,7 +4926,7 @@ function FlowApp({
               profileIncomplete={profileIncomplete}
               onOpenProfileSetup={onOpenProfileSetup}
               onSettingChange={updateSetting}
-              onLogout={onLogout}
+              onLogout={logout}
             />
           ) : null}
         </Animated.View>
@@ -4411,6 +4961,17 @@ function FlowApp({
             <ParticleDot key={particle.id} particle={particle} onDone={removeParticle} />
           ))}
         </View>
+        <TodayTourOverlay
+          visible={showTodayTour}
+          step={todayTourSteps[tourStepIndex] ?? todayTourSteps[0]}
+          stepIndex={tourStepIndex}
+          totalSteps={todayTourSteps.length}
+          topInset={insets.top}
+          bottomInset={insets.bottom}
+          contentMaxWidth={contentMaxWidth}
+          onNext={nextTodayTourStep}
+          onSkip={finishTodayTour}
+        />
       </LinearGradient>
     </View>
   );
@@ -4528,7 +5089,7 @@ function TodayScreen({
         <Pressable accessibilityRole="button" accessibilityLabel="Open profile" onPress={onOpenProfile} style={styles.avatar}>
           <LogoMark size={42} reduceMotion={reduceMotion} style={styles.logoMarkInline} />
         </Pressable>
-        <View style={styles.greetingBlock}>
+        <View pointerEvents="none" style={styles.greetingBlock}>
           <Text numberOfLines={1} style={styles.greetingSub}>{todayLabel}</Text>
           <Text numberOfLines={1} style={styles.greetingName}>{username}</Text>
         </View>
@@ -4686,8 +5247,8 @@ function AdaptiveTodayHero({
             palette={wavePalette}
             reduceMotion={reduceMotion}
             accent={accent}
-            textColor={currentTheme.inkOnHero}
-            subTextColor={isNight ? 'rgba(228,226,255,0.72)' : colors.inkSoft}
+            textColor="#000000"
+            subTextColor="#000000"
             trackColor={isNight ? 'rgba(228,226,255,0.18)' : 'rgba(120,140,180,0.18)'}
           />
         </View>
@@ -4716,7 +5277,7 @@ function AdaptiveTodayHero({
 function HeroAmbientScene({ themeKey, reduceMotion }: { themeKey: HeroThemeKey; reduceMotion: boolean }) {
   const sunTop = themeKey === 'morning' ? 86 : themeKey === 'afternoon' ? 54 : 136;
   const sunSize = themeKey === 'afternoon' ? 112 : themeKey === 'evening' ? 98 : 94;
-  const showSun = themeKey !== 'night';
+  const showSun = themeKey !== 'night' && themeKey !== 'afternoon';
   const isEvening = themeKey === 'evening';
 
   return (
@@ -4724,7 +5285,6 @@ function HeroAmbientScene({ themeKey, reduceMotion }: { themeKey: HeroThemeKey; 
       {themeKey === 'night' ? (
         <>
           <NightStarField reduceMotion={reduceMotion} />
-          <MoonDisc reduceMotion={reduceMotion} />
           <ShootingLight reduceMotion={reduceMotion} delay={900} top={56} right={18} />
           <ShootingLight reduceMotion={reduceMotion} delay={3600} top={126} right={-4} />
         </>
@@ -4732,7 +5292,7 @@ function HeroAmbientScene({ themeKey, reduceMotion }: { themeKey: HeroThemeKey; 
 
       {showSun ? (
         <>
-          <SunRays themeKey={themeKey} size={isEvening ? 176 : themeKey === 'afternoon' ? 228 : 186} top={sunTop - 34} reduceMotion={reduceMotion} />
+          <SunRays themeKey={themeKey} size={isEvening ? 176 : 186} top={sunTop - 34} reduceMotion={reduceMotion} />
           <SunDisc themeKey={themeKey} size={sunSize} top={sunTop} reduceMotion={reduceMotion} />
         </>
       ) : null}
@@ -5346,8 +5906,8 @@ function TimelineMarker({
   const scale = useRef(new Animated.Value(0)).current;
   const tooltip = useRef(new Animated.Value(0)).current;
   const palette = habitPalette[ritual.paletteKey];
-  const markerTop = 41 - stackIndex * 28;
-  const stemHeight = stackIndex * 28 + 16;
+  const markerTop = 27 - stackIndex * 22;
+  const stemHeight = stackIndex * 22 + 12;
 
   useEffect(() => {
     Animated.spring(scale, {
@@ -5368,7 +5928,7 @@ function TimelineMarker({
   }, [tooltip, visibleTooltip]);
 
   return (
-    <Animated.View style={[styles.timelineMarkerWrap, { left: `${leftPct}%`, top: markerTop, zIndex: 5 + stackIndex, transform: [{ translateX: -16 }, { scale }] }]}>
+    <Animated.View style={[styles.timelineMarkerWrap, { left: `${leftPct}%`, top: markerTop, zIndex: 5 + stackIndex, transform: [{ translateX: -14 }, { scale }] }]}>
       {clusterSize > 1 && stackIndex > 0 ? <View style={[styles.timelineStem, { height: stemHeight, backgroundColor: palette.a }]} /> : null}
       <Pressable accessibilityRole="button" accessibilityLabel={`${ritual.name} completed at ${fmtHour(ritual.completedAt ?? 0)}`} onPress={onPress} style={[styles.timelineMarker, { shadowColor: palette.a }]}>
         <Text style={styles.timelineMarkerIcon}>{ritual.icon}</Text>
@@ -6489,6 +7049,91 @@ function HeaderMetricTooltip({ metric }: { metric: HeaderMetric }) {
   );
 }
 
+function TodayTourOverlay({
+  visible,
+  step,
+  stepIndex,
+  totalSteps,
+  topInset,
+  bottomInset,
+  contentMaxWidth,
+  onNext,
+  onSkip,
+}: {
+  visible: boolean;
+  step: TodayTourStep;
+  stepIndex: number;
+  totalSteps: number;
+  topInset: number;
+  bottomInset: number;
+  contentMaxWidth?: number;
+  onNext: () => void;
+  onSkip: () => void;
+}) {
+  const { width, height } = useWindowDimensions();
+
+  if (!visible) {
+    return null;
+  }
+
+  const screenPadding = 20;
+  const contentWidth = contentMaxWidth ? Math.min(width, contentMaxWidth) : width;
+  const contentLeft = (width - contentWidth) / 2;
+  const topRowOffset = 8;
+  const pillWidth = 46;
+  const pillGap = 5;
+  const pillHeight = 34;
+  const iconOffsetFromPillLeft = 13;
+  const metricIndex = step.id === 'streak' ? 0 : step.id === 'points' ? 1 : 2;
+  const statRowWidth = pillWidth * 3 + pillGap * 2;
+  const firstPillLeft = contentLeft + contentWidth - screenPadding - statRowWidth;
+  const iconCenterX = firstPillLeft + metricIndex * (pillWidth + pillGap) + iconOffsetFromPillLeft;
+  const iconCenterY = topInset + topRowOffset + ((52 - pillHeight) / 2) + (pillHeight / 2);
+  const spotlightSize = 34;
+  const rawCardTop = step.id === 'goal' ? Math.max(topInset + 332, 330) : Math.max(topInset + 76, 92);
+  const cardTop = Math.max(topInset + 72, Math.min(rawCardTop, height - bottomInset - 236));
+  const spotlightStyle: ViewStyle = step.id === 'goal'
+    ? {
+        width: Math.min(width - 72, 246),
+        height: Math.min(width - 72, 246),
+        borderRadius: 132,
+        left: (width - Math.min(width - 72, 246)) / 2,
+        top: Math.max(topInset + 114, 124),
+      }
+    : {
+        width: spotlightSize,
+        height: spotlightSize,
+        borderRadius: spotlightSize / 2,
+        left: iconCenterX - spotlightSize / 2,
+        top: iconCenterY - spotlightSize / 2,
+      };
+
+  return (
+    <View style={styles.tourRoot}>
+      <View style={styles.tourScrim} />
+      <View pointerEvents="none" style={[styles.tourSpotlight, spotlightStyle, { borderColor: step.color }]} />
+      <View style={[styles.tourCard, { top: cardTop }]}>
+        <View style={[styles.tourIcon, { backgroundColor: `${step.color}18` }]}>
+          <Text style={styles.tourIconText}>{step.icon}</Text>
+        </View>
+        <View style={styles.tourCopy}>
+          <Text style={styles.tourStep}>{stepIndex + 1}/{totalSteps}</Text>
+          <Text style={styles.tourTitle}>{step.title}</Text>
+          <Text style={styles.tourBody}>{step.body}</Text>
+        </View>
+        <View style={styles.tourActions}>
+          <Pressable accessibilityRole="button" onPress={onSkip} style={styles.tourSkipButton}>
+            <Text style={styles.tourSkipText}>Skip</Text>
+          </Pressable>
+          <Pressable accessibilityRole="button" onPress={onNext} style={[styles.tourNextButton, { backgroundColor: step.color }]}>
+            <Text style={styles.tourNextText}>{stepIndex >= totalSteps - 1 ? 'Done' : 'Next'}</Text>
+          </Pressable>
+        </View>
+      </View>
+    </View>
+  );
+}
+
 function StatusRow({
   icon,
   name,
@@ -7241,6 +7886,7 @@ function AddRitualSheet({
   const [timePickerOpen, setTimePickerOpen] = useState(false);
   const [hasError, setHasError] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [saving, setSaving] = useState(false);
   const overlay = useRef(new Animated.Value(0)).current;
   const sheetY = useRef(new Animated.Value(420)).current;
   const isEditing = Boolean(editingRitual);
@@ -7287,6 +7933,7 @@ function AddRitualSheet({
     setTimePickerOpen(false);
     setHasError(false);
     setConfirmDelete(false);
+    setSaving(false);
   }, [editingRitual?.id, open]);
 
   useEffect(() => {
@@ -7325,6 +7972,9 @@ function AddRitualSheet({
   }, [open, overlay, reduceMotion, sheetY]);
 
   const submit = async () => {
+    if (saving) {
+      return;
+    }
     const trimmed = name.trim();
     if (!trimmed || !amountValid) {
       setHasError(true);
@@ -7341,12 +7991,14 @@ function AddRitualSheet({
     };
 
     try {
+      setSaving(true);
       if (isEditing && editingRitual && onUpdate) {
         await onUpdate(editingRitual.id, draft);
       } else {
         await onAdd(draft);
       }
     } catch {
+      setSaving(false);
       return;
     }
 
@@ -7359,11 +8011,12 @@ function AddRitualSheet({
     setReminderTime('20:00');
     setHasError(false);
     setConfirmDelete(false);
+    setSaving(false);
     onClose();
   };
 
   const handleDelete = async () => {
-    if (!editingRitual || !onDelete) {
+    if (!editingRitual || !onDelete || saving) {
       return;
     }
     if (!confirmDelete) {
@@ -7371,11 +8024,14 @@ function AddRitualSheet({
       return;
     }
     try {
+      setSaving(true);
       await onDelete(editingRitual.id);
     } catch {
+      setSaving(false);
       return;
     }
     setConfirmDelete(false);
+    setSaving(false);
     onClose();
   };
 
@@ -7400,9 +8056,9 @@ function AddRitualSheet({
   }
 
   return (
-    <Modal visible transparent animationType="none" onRequestClose={onClose}>
+    <Modal visible transparent animationType="none" onRequestClose={() => { if (!saving) onClose(); }}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={[styles.modalRoot, isTablet && styles.modalRootTablet]}>
-        <Pressable style={StyleSheet.absoluteFill} onPress={onClose}>
+        <Pressable style={StyleSheet.absoluteFill} disabled={saving} onPress={onClose}>
           <Animated.View style={[styles.modalOverlay, { opacity: overlay }]} />
         </Pressable>
         <Animated.View
@@ -7544,7 +8200,7 @@ function AddRitualSheet({
           <View style={styles.reminderChipRow}>
             {reminderPresets.map((preset) => (
               <Pressable
-                key={preset.value}
+                key={preset.value ?? 'off'}
                 accessibilityRole="button"
                 accessibilityState={{ selected: reminderTime === preset.value }}
                 onPress={() => {
@@ -7588,18 +8244,18 @@ function AddRitualSheet({
           ) : null}
 
           {isEditing ? (
-            <Pressable accessibilityRole="button" onPress={handleDelete} style={[styles.deleteRitualButton, confirmDelete && styles.deleteRitualButtonConfirm]}>
+            <Pressable accessibilityRole="button" disabled={saving} onPress={handleDelete} style={[styles.deleteRitualButton, confirmDelete && styles.deleteRitualButtonConfirm, saving && styles.btnPrimaryDisabled]}>
               <Trash2 size={16} color={colors.danger} strokeWidth={2.5} />
-              <Text style={styles.deleteRitualText}>{confirmDelete ? 'Tap again to delete' : 'Delete ritual'}</Text>
+              <Text style={styles.deleteRitualText}>{saving ? 'Deleting' : confirmDelete ? 'Tap again to delete' : 'Delete ritual'}</Text>
             </Pressable>
           ) : null}
 
           <View style={styles.modalActions}>
-            <Pressable accessibilityRole="button" onPress={onClose} style={styles.btnSecondary}>
+            <Pressable accessibilityRole="button" disabled={saving} onPress={onClose} style={[styles.btnSecondary, saving && styles.btnPrimaryDisabled]}>
               <Text style={styles.btnSecondaryText}>Cancel</Text>
             </Pressable>
-            <Pressable accessibilityRole="button" disabled={!name.trim() || !amountValid} onPress={submit} style={[styles.btnPrimary, (!name.trim() || !amountValid) && styles.btnPrimaryDisabled]}>
-              <Text style={styles.btnPrimaryText}>{isEditing ? 'Save changes' : 'Add ritual'}</Text>
+            <Pressable accessibilityRole="button" disabled={!name.trim() || !amountValid || saving} onPress={submit} style={[styles.btnPrimary, (!name.trim() || !amountValid || saving) && styles.btnPrimaryDisabled]}>
+              <Text style={styles.btnPrimaryText}>{saving ? 'Saving' : isEditing ? 'Save changes' : 'Add ritual'}</Text>
             </Pressable>
           </View>
           </ScrollView>
@@ -8028,7 +8684,7 @@ const styles = StyleSheet.create({
     fontSize: 11.5,
     color: colors.inkSoft,
     textTransform: 'uppercase',
-    letterSpacing: 0.4,
+    letterSpacing: 0,
     marginBottom: 7,
     paddingLeft: 4,
   },
@@ -8325,14 +8981,26 @@ const styles = StyleSheet.create({
     width: '100%',
     paddingHorizontal: 20,
   },
+  onboardingTopBar: {
+    minHeight: 34,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  onboardingSkip: {
+    fontFamily: fontBodyExtra,
+    fontSize: 12.5,
+    color: colors.blue1,
+  },
   onboardingProgress: {
     flexDirection: 'row',
     justifyContent: 'center',
     gap: 8,
-    marginBottom: 22,
+    marginBottom: 18,
   },
   onboardingProgressDot: {
-    width: 32,
+    width: 26,
     height: 6,
     borderRadius: 999,
   },
@@ -8345,7 +9013,7 @@ const styles = StyleSheet.create({
   onboardingHeader: {
     alignItems: 'center',
     paddingHorizontal: 10,
-    marginBottom: 20,
+    marginBottom: 18,
   },
   onboardingTitle: {
     fontFamily: fontSerifSemi,
@@ -8546,12 +9214,60 @@ const styles = StyleSheet.create({
     maxWidth: 350,
   },
   profileSetupCard: {
-    borderRadius: 32,
-    padding: 22,
+    borderRadius: 24,
+    padding: 16,
+    borderColor: 'rgba(255,255,255,0.78)',
+    backgroundColor: 'rgba(255,255,255,0.92)',
+  },
+  profileCardHeader: {
+    minHeight: 54,
+    borderRadius: 18,
+    backgroundColor: '#F6FAFF',
+    borderWidth: 1,
+    borderColor: 'rgba(79,168,255,0.16)',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginBottom: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  profileCardHeaderIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: 'rgba(79,168,255,0.13)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  profileCardHeaderCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  profileCardHeaderTitle: {
+    fontFamily: fontBodyExtra,
+    fontSize: 12.5,
+    color: colors.ink,
+  },
+  profileCardHeaderText: {
+    fontFamily: fontBody,
+    fontSize: 11,
+    lineHeight: 15,
+    color: colors.inkSoft,
+    marginTop: 1,
+  },
+  profileCardHeaderStep: {
+    fontFamily: fontSerifBold,
+    fontSize: 13,
+    color: colors.blue1,
   },
   profileTwoColumn: {
     flexDirection: 'row',
     gap: 10,
+  },
+  profileTwoColumnStacked: {
+    flexDirection: 'column',
+    gap: 0,
   },
   profileHalfField: {
     flex: 1,
@@ -8564,12 +9280,17 @@ const styles = StyleSheet.create({
     minHeight: 56,
     borderRadius: 18,
     borderWidth: 1.5,
-    borderColor: 'rgba(120,140,180,0.16)',
-    backgroundColor: '#F5F8FC',
-    paddingHorizontal: 14,
+    borderColor: 'rgba(120,140,180,0.18)',
+    backgroundColor: '#F8FBFF',
+    paddingHorizontal: 13,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 9,
+    shadowColor: '#4060A0',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.04,
+    shadowRadius: 10,
+    elevation: 1,
   },
   floatingInputContent: {
     flex: 1,
@@ -8582,7 +9303,7 @@ const styles = StyleSheet.create({
     left: 0,
     fontFamily: fontBodyExtra,
     textTransform: 'uppercase',
-    letterSpacing: 0.4,
+    letterSpacing: 0,
   },
   floatingInput: {
     flex: 1,
@@ -8602,7 +9323,7 @@ const styles = StyleSheet.create({
     fontSize: 11.5,
     color: colors.inkSoft,
     textTransform: 'uppercase',
-    letterSpacing: 0.4,
+    letterSpacing: 0,
     marginBottom: 8,
     paddingLeft: 4,
   },
@@ -8621,6 +9342,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 7,
+    overflow: 'hidden',
   },
   profileChoiceChipSelected: {
     borderColor: colors.blue1,
@@ -8638,11 +9360,16 @@ const styles = StyleSheet.create({
   },
   profileChoiceDotSelected: {
     backgroundColor: colors.blue1,
+    shadowColor: colors.blue1,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.7,
+    shadowRadius: 4,
   },
   profileChoiceText: {
     fontFamily: fontBodyBold,
     fontSize: 12,
     color: colors.ink,
+    maxWidth: 120,
   },
   profileChoiceTextSelected: {
     color: colors.ink,
@@ -8662,18 +9389,23 @@ const styles = StyleSheet.create({
     color: colors.ink,
   },
   profileContinueButton: {
-    marginTop: 2,
+    marginTop: 4,
+  },
+  profileContinueButtonReady: {
+    shadowOpacity: 0.5,
+    shadowRadius: 22,
+    elevation: 10,
   },
   privacyNote: {
     flexDirection: 'row',
     gap: 10,
     alignItems: 'flex-start',
     marginTop: 16,
-    borderRadius: 18,
-    backgroundColor: 'rgba(51,203,161,0.1)',
+    borderRadius: 20,
+    backgroundColor: 'rgba(51,203,161,0.12)',
     borderWidth: 1,
-    borderColor: 'rgba(51,203,161,0.22)',
-    padding: 12,
+    borderColor: 'rgba(51,203,161,0.26)',
+    padding: 13,
   },
   privacyIcon: {
     width: 28,
@@ -9021,6 +9753,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 18,
+    position: 'relative',
   },
   avatar: {
     width: 42,
@@ -9038,10 +9771,14 @@ const styles = StyleSheet.create({
     fontSize: 19,
   },
   greetingBlock: {
-    flex: 1,
+    position: 'absolute',
+    left: 52,
+    right: 150,
+    top: 0,
+    bottom: 0,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 8,
+    paddingHorizontal: 6,
   },
   greetingSub: {
     fontFamily: fontBody,
@@ -9465,14 +10202,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'flex-end',
-    gap: 6,
+    gap: 5,
     flexShrink: 0,
+    marginLeft: 'auto',
   },
   headerStatPill: {
-    minWidth: 56,
-    height: 38,
-    borderRadius: 18,
-    paddingHorizontal: 8,
+    minWidth: 46,
+    height: 34,
+    borderRadius: 17,
+    paddingHorizontal: 7,
     backgroundColor: '#FFFFFF',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.82)',
@@ -9491,7 +10229,7 @@ const styles = StyleSheet.create({
   },
   headerStatValue: {
     fontFamily: fontSerifBold,
-    fontSize: 15,
+    fontSize: 14,
     color: colors.ink,
   },
   headerTooltip: {
@@ -9519,6 +10257,113 @@ const styles = StyleSheet.create({
     fontSize: 11.5,
     lineHeight: 16,
     color: colors.ink,
+  },
+  tourRoot: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    zIndex: 90,
+    elevation: 30,
+  },
+  tourScrim: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(10,18,38,0.48)',
+  },
+  tourSpotlight: {
+    position: 'absolute',
+    borderWidth: 3,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    shadowColor: '#FFFFFF',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.7,
+    shadowRadius: 16,
+    elevation: 10,
+  },
+  tourCard: {
+    position: 'absolute',
+    left: 20,
+    right: 20,
+    borderRadius: 22,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.78)',
+    padding: 16,
+    paddingBottom: 58,
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+    ...shadow,
+    shadowOpacity: 0.2,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 14 },
+  },
+  tourIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  tourIconText: {
+    fontSize: 20,
+  },
+  tourCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  tourStep: {
+    fontFamily: fontBodyExtra,
+    fontSize: 10.5,
+    color: colors.inkFaint,
+    marginBottom: 3,
+  },
+  tourTitle: {
+    fontFamily: fontBodyBold,
+    fontSize: 15,
+    color: colors.ink,
+  },
+  tourBody: {
+    fontFamily: fontBody,
+    fontSize: 12.5,
+    lineHeight: 18,
+    color: colors.inkSoft,
+    marginTop: 6,
+  },
+  tourActions: {
+    position: 'absolute',
+    right: 14,
+    bottom: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  tourSkipButton: {
+    minHeight: 32,
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  tourSkipText: {
+    fontFamily: fontBodyExtra,
+    fontSize: 12,
+    color: colors.inkSoft,
+  },
+  tourNextButton: {
+    minHeight: 32,
+    borderRadius: 16,
+    justifyContent: 'center',
+    paddingHorizontal: 13,
+  },
+  tourNextText: {
+    fontFamily: fontBodyExtra,
+    fontSize: 12,
+    color: '#FFFFFF',
   },
   heroHead: {
     textAlign: 'center',
@@ -9639,39 +10484,39 @@ const styles = StyleSheet.create({
   },
   rhythmCard: {
     backgroundColor: '#FFFFFF',
-    borderRadius: 22,
+    borderRadius: 18,
     borderWidth: 1,
     borderColor: colors.cardBorder,
-    padding: 16,
-    marginBottom: 18,
+    padding: 12,
+    marginBottom: 12,
     ...shadow,
-    shadowOpacity: 0.12,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.09,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
   },
   rhythmHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 14,
+    marginBottom: 8,
   },
   rhythmTitle: {
     fontFamily: fontSerifSemi,
-    fontSize: 17,
+    fontSize: 15,
     color: colors.ink,
   },
   rhythmLogged: {
     fontFamily: fontBodyExtra,
-    fontSize: 12,
+    fontSize: 11,
     color: colors.inkSoft,
   },
   rhythmTrackWrap: {
-    height: 112,
+    height: 76,
     justifyContent: 'center',
   },
   rhythmTrack: {
-    height: 34,
-    borderRadius: 17,
+    height: 26,
+    borderRadius: 13,
     overflow: 'hidden',
     flexDirection: 'row',
   },
@@ -9680,29 +10525,29 @@ const styles = StyleSheet.create({
   },
   rhythmNowTick: {
     position: 'absolute',
-    top: 12,
-    bottom: 12,
+    top: 8,
+    bottom: 8,
     width: 2,
     borderRadius: 2,
     backgroundColor: 'rgba(28,43,73,0.36)',
   },
   timelineMarkerWrap: {
     position: 'absolute',
-    width: 32,
-    height: 44,
+    width: 28,
+    height: 36,
     alignItems: 'center',
   },
   timelineStem: {
     position: 'absolute',
-    top: 22,
+    top: 18,
     width: 2,
     borderRadius: 2,
     opacity: 0.45,
   },
   timelineMarker: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
     backgroundColor: '#FFFFFF',
     alignItems: 'center',
     justifyContent: 'center',
@@ -9710,19 +10555,19 @@ const styles = StyleSheet.create({
     borderColor: '#FFFFFF',
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.45,
-    shadowRadius: 8,
-    elevation: 6,
+    shadowRadius: 6,
+    elevation: 5,
   },
   timelineMarkerIcon: {
-    fontSize: 15,
+    fontSize: 12,
   },
   timelineCountBadge: {
     position: 'absolute',
-    top: -5,
-    right: -7,
-    minWidth: 18,
-    height: 18,
-    borderRadius: 9,
+    top: -4,
+    right: -5,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 2,
@@ -9730,18 +10575,18 @@ const styles = StyleSheet.create({
   },
   timelineCountText: {
     fontFamily: fontBodyExtra,
-    fontSize: 9,
+    fontSize: 8,
     color: '#FFFFFF',
   },
   timelineTooltip: {
     position: 'absolute',
-    bottom: 40,
+    bottom: 32,
     minWidth: 112,
     maxWidth: 172,
     borderRadius: 12,
     backgroundColor: colors.ink,
-    paddingVertical: 7,
-    paddingHorizontal: 10,
+    paddingVertical: 6,
+    paddingHorizontal: 9,
     alignItems: 'center',
   },
   timelineTooltipText: {
@@ -9752,7 +10597,7 @@ const styles = StyleSheet.create({
   rhythmAxis: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginTop: 2,
+    marginTop: 0,
   },
   rhythmAxisLabel: {
     fontFamily: fontBodyBold,
@@ -10244,8 +11089,8 @@ const styles = StyleSheet.create({
   profileName: {
     flexShrink: 1,
     minWidth: 0,
-    fontFamily: fontSerif,
-    fontSize: 17,
+    fontFamily: fontBodyBold,
+    fontSize: 16,
     color: colors.ink,
   },
   profileEditButton: {
