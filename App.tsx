@@ -95,7 +95,7 @@ import {
   Zap,
 } from 'lucide-react-native';
 import React, { ComponentType, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { createClient, User as SupabaseUser } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient, User as SupabaseUser } from '@supabase/supabase-js';
 
 type TabKey = 'today' | 'progress' | 'insights' | 'profile';
 type PaletteKey =
@@ -243,6 +243,7 @@ type AuthAccount = {
   habitFocus?: string;
   profileComplete?: boolean;
   profileSetupSkipped?: boolean;
+  starterOnboardingPending?: boolean;
 };
 
 type ProfileSetupData = {
@@ -321,6 +322,26 @@ type SupabaseRitualCheckin = {
   created_at?: string | null;
 };
 
+type SupabaseProfile = {
+  id: string;
+  username: string | null;
+  name: string | null;
+  email: string | null;
+  avatar_emoji: string | null;
+  dark_theme?: boolean | null;
+  haptics_enabled?: boolean | null;
+  push_enabled?: boolean | null;
+  flo_tone?: FloTone | null;
+  age?: number | null;
+  city?: string | null;
+  mobile?: string | null;
+  country_code?: string | null;
+  gender?: string | null;
+  habit_focus?: string | null;
+  profile_complete?: boolean | null;
+  profile_setup_skipped?: boolean | null;
+};
+
 type ReminderScheduleRecord = Record<string, { notificationId: string; reminderTime: string; body: string }>;
 
 const STORAGE_KEY = 'flow-liquid-redesign-v4-clean';
@@ -354,6 +375,7 @@ const DEFAULT_AUTH_ACCOUNT: AuthAccount = {
   countryCode: DEFAULT_COUNTRY_CODE,
   profileComplete: true,
   profileSetupSkipped: false,
+  starterOnboardingPending: false,
 };
 const SUPPORT_EMAIL = 'support@rituals.app';
 const fontBody = 'PlusJakartaSans_500Medium';
@@ -450,16 +472,31 @@ const colors = {
 };
 
 const runtimeExtra = (Constants.expoConfig?.extra ?? {}) as Record<string, unknown>;
-const supabaseUrl = typeof runtimeExtra.supabaseUrl === 'string' ? runtimeExtra.supabaseUrl : undefined;
-const supabaseAnonKey = typeof runtimeExtra.supabaseAnonKey === 'string' ? runtimeExtra.supabaseAnonKey : undefined;
-const nvidiaApiKey = typeof runtimeExtra.nvidiaApiKey === 'string' ? runtimeExtra.nvidiaApiKey : undefined;
+const runtimeEnv = (typeof process !== 'undefined' ? process.env : {}) as Record<string, string | undefined>;
+function readRuntimeString(...values: unknown[]) {
+  const value = values.find((candidate): candidate is string => typeof candidate === 'string' && candidate.trim().length > 0);
+  return value?.trim();
+}
+const supabaseUrl = readRuntimeString(
+  runtimeEnv.EXPO_PUBLIC_SUPABASE_URL,
+  runtimeEnv.VITE_SUPABASE_URL,
+  runtimeExtra.supabaseUrl,
+);
+const supabaseAnonKey = readRuntimeString(
+  runtimeEnv.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
+  runtimeEnv.EXPO_PUBLIC_SUPABASE_ANON_KEY,
+  runtimeEnv.VITE_SUPABASE_PUBLISHABLE_KEY,
+  runtimeEnv.VITE_SUPABASE_ANON_KEY,
+  runtimeExtra.supabaseAnonKey,
+);
+const authRedirectUrl = Platform.OS === 'web' && typeof window !== 'undefined' ? window.location.origin : undefined;
 const supabase = supabaseUrl && supabaseAnonKey
   ? createClient(supabaseUrl, supabaseAnonKey, {
       auth: {
         ...(Platform.OS !== 'web' ? { storage: AsyncStorage } : {}),
         autoRefreshToken: true,
         persistSession: true,
-        detectSessionInUrl: false,
+        detectSessionInUrl: Platform.OS === 'web',
       },
     })
   : null;
@@ -670,6 +707,186 @@ const defaultState: SavedFlowState = {
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 const AnimatedPath = Animated.createAnimatedComponent(Path);
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function dateFromIso(value?: string | null) {
+  if (!value) {
+    return null;
+  }
+  const [year, month, day] = value.split('-').map(Number);
+  if (!year || !month || !day) {
+    return null;
+  }
+  const date = new Date(year, month - 1, day);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function todayIso(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function daysBetweenIso(from?: string | null, to = todayIso()) {
+  const fromDate = dateFromIso(from);
+  const toDate = dateFromIso(to);
+  if (!fromDate || !toDate) {
+    return 0;
+  }
+  return Math.max(0, Math.floor((toDate.getTime() - fromDate.getTime()) / 86400000));
+}
+
+function isoDaysBack(count: number, endIso = todayIso()) {
+  const endDate = dateFromIso(endIso) ?? new Date();
+  return Array.from({ length: count }, (_, index) => {
+    const date = new Date(endDate);
+    date.setDate(endDate.getDate() - (count - 1 - index));
+    return todayIso(date);
+  });
+}
+
+function currentStreakFromHeat(heat: number[]) {
+  let streak = 0;
+  for (let index = heat.length - 1; index >= 0; index -= 1) {
+    if (!heat[index]) {
+      break;
+    }
+    streak += 1;
+  }
+  return streak;
+}
+
+async function lookupProfileForUser(client: SupabaseClient | null, user: SupabaseUser) {
+  if (!client) {
+    return null;
+  }
+  const { data, error } = await client
+    .from('profiles')
+    .select(PROFILE_SELECT)
+    .eq('id', user.id)
+    .maybeSingle();
+  if (error) {
+    throw error;
+  }
+  return data as SupabaseProfile | null;
+}
+
+async function resolveIdentifierEmail(client: SupabaseClient | null, identifier: string) {
+  const normalized = identifier.trim().toLowerCase();
+  if (isValidEmail(normalized)) {
+    return normalized;
+  }
+  if (!client) {
+    return normalized;
+  }
+  const { data, error } = await client
+    .from('profiles')
+    .select('email')
+    .eq('username', normalized)
+    .maybeSingle();
+  if (error) {
+    throw error;
+  }
+  const email = (data as Pick<SupabaseProfile, 'email'> | null)?.email;
+  if (!email) {
+    throw new Error('Account not found for that username.');
+  }
+  return email;
+}
+
+async function syncRitualReminderNotifications({
+  rituals,
+  enabled,
+  notifications,
+  storageKey,
+}: {
+  rituals: Ritual[];
+  enabled: boolean;
+  notifications: {
+    AndroidImportance?: { DEFAULT?: number };
+    SchedulableTriggerInputTypes?: { DAILY?: string };
+    setNotificationChannelAsync?: (id: string, channel: Record<string, unknown>) => Promise<unknown>;
+    getPermissionsAsync: () => Promise<{ granted?: boolean; status?: string }>;
+    requestPermissionsAsync: () => Promise<{ granted?: boolean; status?: string }>;
+    scheduleNotificationAsync: (request: Record<string, unknown>) => Promise<string>;
+    cancelScheduledNotificationAsync: (identifier: string) => Promise<unknown>;
+  } | null;
+  storageKey: string;
+}) {
+  const storedRaw = await AsyncStorage.getItem(storageKey);
+  const stored = storedRaw ? JSON.parse(storedRaw) as ReminderScheduleRecord : {};
+  const cancelStored = async (record?: { notificationId: string }) => {
+    if (record?.notificationId && notifications) {
+      await notifications.cancelScheduledNotificationAsync(record.notificationId).catch(() => undefined);
+    }
+  };
+
+  if (!enabled || !notifications) {
+    await Promise.all(Object.values(stored).map(cancelStored));
+    await AsyncStorage.removeItem(storageKey);
+    return;
+  }
+
+  const permission = await notifications.getPermissionsAsync().catch(() => ({ granted: false, status: 'denied' }));
+  let granted = permission.granted === true || permission.status === 'granted';
+  if (!granted) {
+    const requested = await notifications.requestPermissionsAsync().catch(() => ({ granted: false, status: 'denied' }));
+    granted = requested.granted === true || requested.status === 'granted';
+  }
+  if (!granted) {
+    await Promise.all(Object.values(stored).map(cancelStored));
+    await AsyncStorage.removeItem(storageKey);
+    return;
+  }
+
+  if (Platform.OS === 'android') {
+    await notifications.setNotificationChannelAsync?.('ritual-reminders', {
+      name: 'Ritual reminders',
+      importance: notifications.AndroidImportance?.DEFAULT ?? 3,
+    }).catch(() => undefined);
+  }
+
+  const next: ReminderScheduleRecord = {};
+  for (const ritual of rituals) {
+    if (!ritual.reminderTime) {
+      await cancelStored(stored[ritual.id]);
+      continue;
+    }
+    const body = ritualReminderExplanation(ritual.name, ritual.goalAmount, ritual.goalUnit, ritual.reminderTime);
+    const existing = stored[ritual.id];
+    if (existing?.reminderTime === ritual.reminderTime && existing.body === body) {
+      next[ritual.id] = existing;
+      continue;
+    }
+    await cancelStored(existing);
+    const [hourRaw, minuteRaw] = ritual.reminderTime.split(':');
+    const notificationId = await notifications.scheduleNotificationAsync({
+      content: {
+        title: 'Rituals',
+        body,
+        sound: false,
+      },
+      trigger: {
+        type: notifications.SchedulableTriggerInputTypes?.DAILY ?? 'daily',
+        hour: Number(hourRaw) || 8,
+        minute: Number(minuteRaw) || 0,
+        channelId: 'ritual-reminders',
+      },
+    });
+    next[ritual.id] = { notificationId, reminderTime: ritual.reminderTime, body };
+  }
+
+  await Promise.all(Object.keys(stored).filter((id) => !next[id]).map((id) => cancelStored(stored[id])));
+  await AsyncStorage.setItem(storageKey, JSON.stringify(next));
+}
 
 function percentFromWeekly(weekly: number[]) {
   if (!weekly.length) {
@@ -1100,6 +1317,7 @@ function normalizeAuth(parsed: Partial<StoredAuth> | null): StoredAuth {
         habitFocus: parsedAccount.habitFocus,
         profileComplete: parsedAccount.profileComplete ?? true,
         profileSetupSkipped: parsedAccount.profileSetupSkipped ?? false,
+        starterOnboardingPending: parsedAccount.starterOnboardingPending ?? false,
       }
     : DEFAULT_AUTH_ACCOUNT;
   return {
@@ -1121,6 +1339,8 @@ function authAccountFromUser(user: SupabaseUser, profile?: Partial<SupabaseProfi
   const email = user.email ?? profile?.email ?? '';
   const name = profile?.name || user.user_metadata?.full_name || '';
   const username = name || profile?.username || user.user_metadata?.username || email.split('@')[0] || 'Rituals user';
+  const profileComplete = profile?.profile_complete ?? false;
+  const profileSetupSkipped = profile?.profile_setup_skipped ?? false;
   return {
     id: user.id,
     username,
@@ -1133,10 +1353,13 @@ function authAccountFromUser(user: SupabaseUser, profile?: Partial<SupabaseProfi
     countryCode: profile?.country_code || DEFAULT_COUNTRY_CODE,
     gender: profile?.gender ?? undefined,
     habitFocus: profile?.habit_focus ?? undefined,
-    profileComplete: profile?.profile_complete ?? false,
-    profileSetupSkipped: profile?.profile_setup_skipped ?? false,
+    profileComplete,
+    profileSetupSkipped,
+    starterOnboardingPending: !profileComplete && !profileSetupSkipped,
   };
 }
+
+const buildAuthAccountFromUser = authAccountFromUser;
 
 function isAuthNetworkError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error ?? '');
@@ -1145,7 +1368,7 @@ function isAuthNetworkError(error: unknown) {
 
 function cleanAuthError(error: unknown, fallback: string) {
   if (isAuthNetworkError(error)) {
-    return 'Secure connection to Supabase failed on this device. Your account can continue locally now and sync when the device network/certificate trust is fixed.';
+    return 'Secure connection to Supabase failed on this device, so the account was not created and no email was sent. Check the device date/time, update Android System WebView, or use the Vercel web app, then try again.';
   }
   return error instanceof Error && error.message ? error.message : fallback;
 }
@@ -1159,8 +1382,11 @@ function localAuthAccount(username: string, password: string, email: string, nam
     name: name || username,
     profileComplete: false,
     profileSetupSkipped: false,
+    starterOnboardingPending: true,
   };
 }
+
+const buildLocalAuthAccount = localAuthAccount;
 
 async function getProfileForUser(user: SupabaseUser) {
   if (!supabase) {
@@ -1966,6 +2192,7 @@ function AuthenticatedApp() {
       email={account.email}
       habitFocus={account.habitFocus}
       profileIncomplete={account.profileComplete === false}
+      starterOnboardingPending={account.starterOnboardingPending === true}
       onOpenProfileSetup={() => setProfileSetupSource('profile')}
       onLogout={() => {
         if (supabase) {
@@ -2120,6 +2347,7 @@ function AuthGate({
           email: trimmedEmail,
           password,
           options: {
+            ...(authRedirectUrl ? { emailRedirectTo: authRedirectUrl } : {}),
             data: {
               username,
               full_name: trimmedName,
@@ -2135,40 +2363,23 @@ function AuthGate({
         }
 
         if (!responseUser) {
-          const fallbackAccount = localAuthAccount(username, password, trimmedEmail, trimmedName);
-          setMessage('Supabase returned an empty response, so this account was saved locally. Check your email to confirm and sign in when the domain is ready.');
-          onCreate(fallbackAccount);
+          setError('Supabase returned an empty response. The account was not created. Please try again.');
           return;
         }
 
-        const profile = responseSession
-          ? await upsertProfileForUser(responseUser, username, trimmedName, trimmedEmail)
-          : null;
-        if (!responseSession) {
-          setMessage('Account created. Check your email to confirm, then sign in.');
-          onCreate({
-            ...authAccountFromUser(responseUser, null),
-            username,
-            password,
-            email: trimmedEmail,
-            name: trimmedName,
-            profileComplete: false,
-            profileSetupSkipped: false,
-          });
-          return;
+        if (responseSession) {
+          await upsertProfileForUser(responseUser, username, trimmedName, trimmedEmail);
+          await supabase.auth.signOut();
         }
-        onCreate({
-          ...authAccountFromUser(responseUser, profile),
-          password,
-          profileComplete: false,
-          profileSetupSkipped: false,
-        });
+        setMessage('Account created. Check your email to confirm, then sign in.');
+        setMode('signIn');
+        setIdentifier(trimmedEmail);
+        setEmail('');
+        setFullName('');
+        setPassword('');
+        setConfirmPassword('');
+        setTermsAccepted(false);
       } catch (authError) {
-        if (isAuthNetworkError(authError)) {
-          setMessage('Supabase is unreachable from this device, so Rituals saved this account locally for now.');
-          onCreate(localAuthAccount(username, password, trimmedEmail, trimmedName));
-          return;
-        }
         setError(cleanAuthError(authError, 'Unable to create account.'));
       } finally {
         setSubmitting(false);
@@ -2189,7 +2400,10 @@ function AuthGate({
       try {
         setSubmitting(true);
         const resetEmail = await resolveEmailForIdentifier(normalizedIdentifier);
-        const { error: resetError } = await supabase.auth.resetPasswordForEmail(resetEmail);
+        const { error: resetError } = await supabase.auth.resetPasswordForEmail(
+          resetEmail,
+          authRedirectUrl ? { redirectTo: authRedirectUrl } : undefined,
+        );
         if (resetError) {
           setError(resetError.message);
           return;
@@ -2421,7 +2635,6 @@ function AuthGate({
                       </View>
                       <View style={styles.authSocialRow}>
                         <SocialButton label="Google" reduceMotion={reduceMotion} onPress={() => setMessage('Google sign-in will connect after Supabase Auth setup.')} />
-                        <SocialButton label="Apple" reduceMotion={reduceMotion} onPress={() => setMessage('Apple sign-in will connect after Supabase Auth setup.')} />
                       </View>
                     </>
                   ) : null}
@@ -3356,16 +3569,15 @@ function PolicyModal({ policy, onClose }: { policy: PolicyKey | null; onClose: (
   );
 }
 
-function SocialButton({ label, reduceMotion, onPress }: { label: 'Google' | 'Apple'; reduceMotion: boolean; onPress: () => void }) {
-  const isApple = label === 'Apple';
+function SocialButton({ label, reduceMotion, onPress }: { label: 'Google'; reduceMotion: boolean; onPress: () => void }) {
   return (
     <PressScale
       reduceMotion={reduceMotion}
       onPress={onPress}
-      style={[styles.authSocialButton, isApple ? styles.authSocialButtonApple : styles.authSocialButtonGoogle]}
+      style={[styles.authSocialButton, styles.authSocialButtonGoogle]}
     >
-      {isApple ? <AppleGlyph /> : <GoogleGMark />}
-      <Text style={[styles.authSocialText, isApple ? styles.authSocialTextApple : styles.authSocialTextGoogle]}>
+      <GoogleGMark />
+      <Text style={[styles.authSocialText, styles.authSocialTextGoogle]}>
         Continue with {label}
       </Text>
     </PressScale>
@@ -3379,17 +3591,6 @@ function GoogleGMark() {
       <Path d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.258c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.583-5.036-3.71H.957v2.332A8.997 8.997 0 0 0 9 18Z" fill="#34A853" />
       <Path d="M3.964 10.712A5.41 5.41 0 0 1 3.682 9c0-.594.102-1.17.282-1.712V4.956H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.044l3.007-2.332Z" fill="#FBBC05" />
       <Path d="M9 3.58c1.322 0 2.508.454 3.44 1.346l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.956l3.007 2.332C4.672 5.161 6.656 3.58 9 3.58Z" fill="#EA4335" />
-    </Svg>
-  );
-}
-
-function AppleGlyph() {
-  return (
-    <Svg width={16} height={18} viewBox="0 0 16 18" accessibilityLabel="Apple">
-      <Path
-        d="M12.94 9.55c-.02-1.86 1.52-2.75 1.59-2.8-.87-1.27-2.21-1.44-2.68-1.46-1.14-.12-2.23.67-2.81.67-.58 0-1.47-.65-2.42-.63-1.25.02-2.4.73-3.04 1.85-1.3 2.25-.33 5.58.93 7.4.62.9 1.36 1.91 2.33 1.87.93-.04 1.29-.6 2.41-.6 1.12 0 1.44.6 2.42.58 1-.02 1.64-.91 2.25-1.81.71-1.04 1-2.04 1.02-2.09-.02-.01-1.98-.76-2-2.98ZM11.1 4.09c.51-.62.86-1.49.76-2.35-.74.03-1.64.49-2.17 1.11-.48.56-.9 1.45-.79 2.31.83.06 1.68-.42 2.2-1.07Z"
-        fill="#FFFFFF"
-      />
     </Svg>
   );
 }
@@ -3440,6 +3641,7 @@ function FlowApp({
   email,
   habitFocus,
   profileIncomplete,
+  starterOnboardingPending,
   onOpenProfileSetup,
   onLogout,
 }: {
@@ -3448,6 +3650,7 @@ function FlowApp({
   email?: string;
   habitFocus?: string;
   profileIncomplete: boolean;
+  starterOnboardingPending: boolean;
   onOpenProfileSetup: () => void;
   onLogout: () => void;
 }) {
@@ -3474,10 +3677,15 @@ function FlowApp({
   const [particles, setParticles] = useState<BurstParticle[]>([]);
   const [newRitualId, setNewRitualId] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
+  const [starterOnboardingAllowed, setStarterOnboardingAllowed] = useState(starterOnboardingPending);
   const isTablet = width >= TABLET_MIN_WIDTH;
   const appHorizontalPadding = isTablet ? 28 : 20;
   const storageKey = useMemo(() => (userId ? `${STORAGE_KEY}:${userId}` : STORAGE_KEY), [userId]);
   const canUseRemote = Boolean(supabase && userId && !userId.startsWith('local-'));
+
+  useEffect(() => {
+    setStarterOnboardingAllowed(starterOnboardingPending);
+  }, [starterOnboardingPending, userId]);
 
   useEffect(() => {
     let mounted = true;
@@ -3794,6 +4002,7 @@ function FlowApp({
     }
 
     setOnboardingDream(dream);
+    setStarterOnboardingAllowed(false);
     setRituals(nextRituals);
     setTotalActiveRituals(nextRituals.length);
     setBaseDoneFromOtherHabits(0);
@@ -4097,7 +4306,7 @@ function FlowApp({
     );
   }
 
-  if (!onboardingDream && rituals.length === 0) {
+  if (starterOnboardingAllowed && !onboardingDream && rituals.length === 0) {
     return (
       <OnboardingDreamFlow
         reduceMotion={reduceMotion}
@@ -8020,19 +8229,12 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
     borderColor: '#DADCE0',
   },
-  authSocialButtonApple: {
-    backgroundColor: '#000000',
-    borderColor: '#000000',
-  },
   authSocialText: {
     fontFamily: fontBodyBold,
     fontSize: 13.5,
   },
   authSocialTextGoogle: {
     color: '#3C4043',
-  },
-  authSocialTextApple: {
-    color: '#FFFFFF',
   },
   authFooterLine: {
     flexDirection: 'row',
