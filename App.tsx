@@ -66,6 +66,7 @@ import Svg, {
 } from 'react-native-svg';
 import {
   ArrowRight,
+  AtSign,
   BarChart3,
   Bell,
   Bot,
@@ -1516,12 +1517,21 @@ function normalizeAuth(parsed: Partial<StoredAuth> | null): StoredAuth {
 }
 
 function toUsername(value: string) {
-  const normalized = value
+  const normalized = sanitizeUsername(value);
+  return normalized || `ritual_${Date.now()}`;
+}
+
+function sanitizeUsername(value: string) {
+  return value
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9_]+/g, '_')
-    .replace(/^_+|_+$/g, '');
-  return normalized || `ritual_${Date.now()}`;
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 24);
+}
+
+function isValidUsername(value: string) {
+  return /^[a-z0-9_]{3,24}$/.test(value);
 }
 
 function authAccountFromUser(user: SupabaseUser, profile?: Partial<SupabaseProfile> | null): AuthAccount {
@@ -2451,16 +2461,18 @@ function AuthenticatedApp() {
         if (!session?.user || !mounted) {
           return;
         }
-        await supabase.auth.signOut().catch(() => undefined);
+        const profile = await getProfileForUser(session.user);
+        const nextAccount = buildAuthAccountFromUser(session.user, profile);
         if (!mounted) {
           return;
         }
         setAuthGateError('');
-        setAuthGateMessage('Email confirmed. Sign in with your email or username and password.');
-        setSignedIn(false);
-        setProfileSetupSource(null);
+        setAuthGateMessage('');
+        setAccount(nextAccount);
+        setSignedIn(true);
+        setProfileSetupSource(profileSetupSourceForAccount(nextAccount));
         setReady(true);
-        saveLocalAuth(account, false);
+        saveLocalAuth(nextAccount, true);
         ExpoLinking.clearInitialURL?.();
       } catch (error) {
         if (mounted) {
@@ -2611,6 +2623,7 @@ function AuthGate({
   const reduceMotion = useReducedMotion();
   const [mode, setMode] = useState<AuthMode>('signIn');
   const [identifier, setIdentifier] = useState('');
+  const [usernameInput, setUsernameInput] = useState('');
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -2637,6 +2650,7 @@ function AuthGate({
   const authPanelMinHeight = useSplitAuthLayout
     ? Math.max(500, Math.min(640, height - authTopPadding - authBottomPadding))
     : undefined;
+  const usernameIsInvalid = usernameInput.length > 0 && !isValidUsername(usernameInput);
   const emailIsInvalid = email.length > 0 && !isValidEmail(email);
   const strength = getPasswordStrength(password);
   const confirmPasswordMismatch = confirmPassword.length > 0 && password !== confirmPassword;
@@ -2662,6 +2676,7 @@ function AuthGate({
 
   const switchMode = (nextMode: AuthMode) => {
     setMode(nextMode);
+    setUsernameInput('');
     setPassword('');
     setConfirmPassword('');
     setPasswordVisible(false);
@@ -2726,7 +2741,11 @@ function AuthGate({
     clearFeedback();
     const trimmedName = fullName.trim();
     const trimmedEmail = email.trim().toLowerCase();
-    const username = toUsername(trimmedName);
+    const username = sanitizeUsername(usernameInput);
+    if (!isValidUsername(username)) {
+      setError('Choose a username with 3-24 letters, numbers, or underscores.');
+      return;
+    }
     if (trimmedName.length < 2) {
       setError('Enter your full name.');
       return;
@@ -2782,7 +2801,7 @@ function AuthGate({
           return;
         }
 
-        let confirmationMessage = 'Account created. Check your email to confirm, then sign in with your email or username and password.';
+        let confirmationMessage = 'Account created. Check your email and tap Confirm. The app will open and continue setup.';
         if (responseSession) {
           const profile = await upsertProfileForUser(responseUser, username, trimmedName, trimmedEmail);
           await supabase.auth.signOut().catch(() => undefined);
@@ -2798,6 +2817,7 @@ function AuthGate({
         setMessage(confirmationMessage);
         setMode('signIn');
         setIdentifier(trimmedEmail);
+        setUsernameInput('');
         setEmail('');
         setFullName('');
         setPassword('');
@@ -2978,6 +2998,20 @@ function AuthGate({
                 >
                   {isCreate ? (
                     <>
+                      <AuthInput
+                        icon={AtSign}
+                        label="Username"
+                        value={usernameInput}
+                        onChangeText={(value) => {
+                          setUsernameInput(sanitizeUsername(value));
+                          setPendingConfirmationEmail('');
+                          clearFeedback();
+                        }}
+                        placeholder="pratik28"
+                        returnKeyType="next"
+                        error={usernameIsInvalid}
+                        helperText={usernameIsInvalid ? 'Use 3-24 letters, numbers, or underscores' : undefined}
+                      />
                       <AuthInput
                         icon={User}
                         label="Name"
