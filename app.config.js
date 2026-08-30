@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { withAndroidManifest, withDangerousMod } = require('@expo/config-plugins');
 
-const APP_SCHEME = 'com.pratikbhangale.rituals';
+const APP_SCHEME = 'com.bhang.ritual';
 const NETWORK_SECURITY_CONFIG = `<?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
   <base-config cleartextTrafficPermitted="false">
