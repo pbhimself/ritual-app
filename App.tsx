@@ -2338,6 +2338,7 @@ function AuthenticatedApp() {
   const [signedIn, setSignedIn] = useState(false);
   const [profileSetupSource, setProfileSetupSource] = useState<'create' | 'profile' | null>(null);
   const [authGateError, setAuthGateError] = useState('');
+  const [authGateMessage, setAuthGateMessage] = useState('');
   const reduceMotion = useReducedMotion();
 
   useEffect(() => {
@@ -2358,18 +2359,13 @@ function AuthenticatedApp() {
             }
             return;
           }
-        } catch {
-          // Fall through to local auth so emulator/device TLS issues do not block the app.
-        }
-        const stored = await AsyncStorage.getItem(AUTH_STORAGE_KEY);
-        const parsed = stored ? normalizeAuth(JSON.parse(stored) as Partial<StoredAuth>) : normalizeAuth(null);
-        if (parsed.signedIn) {
+        } catch (error) {
           if (mounted) {
-            setAccount(parsed.account);
-            setSignedIn(true);
-            if (parsed.account.profileComplete === false && !parsed.account.profileSetupSkipped) {
-              setProfileSetupSource(profileSetupSourceForAccount(parsed.account));
-            }
+            setAuthGateError(cleanAuthError(
+              error,
+              'Unable to check your sign-in session.',
+              'Secure connection to Supabase failed on this device. Check automatic date/time, update Android System WebView or Chrome, try another network, then try again.',
+            ));
           }
         }
         if (mounted) {
@@ -2455,21 +2451,21 @@ function AuthenticatedApp() {
         if (!session?.user || !mounted) {
           return;
         }
-        const profile = await getProfileForUser(session.user);
-        const nextAccount = buildAuthAccountFromUser(session.user, profile);
+        await supabase.auth.signOut().catch(() => undefined);
         if (!mounted) {
           return;
         }
         setAuthGateError('');
-        setAccount(nextAccount);
-        setSignedIn(true);
-        setProfileSetupSource(profileSetupSourceForAccount(nextAccount));
+        setAuthGateMessage('Email confirmed. Sign in with your email or username and password.');
+        setSignedIn(false);
+        setProfileSetupSource(null);
         setReady(true);
-        saveLocalAuth(nextAccount, true);
+        saveLocalAuth(account, false);
         ExpoLinking.clearInitialURL?.();
       } catch (error) {
         if (mounted) {
           setAuthGateError(cleanAuthError(error, 'Unable to finish email confirmation.'));
+          setAuthGateMessage('');
           setReady(true);
         }
       }
@@ -2530,10 +2526,12 @@ function AuthenticatedApp() {
       <AuthGate
         account={account}
         externalError={authGateError}
+        externalMessage={authGateMessage}
         onLogin={(nextAccount) => {
           setAccount(nextAccount);
           setSignedIn(true);
           setAuthGateError('');
+          setAuthGateMessage('');
           setProfileSetupSource(profileSetupSourceForAccount(nextAccount));
           saveLocalAuth(nextAccount, true);
         }}
@@ -2546,6 +2544,7 @@ function AuthenticatedApp() {
           setAccount(createdAccount);
           setSignedIn(true);
           setAuthGateError('');
+          setAuthGateMessage('');
           setProfileSetupSource(profileSetupSourceForAccount(createdAccount));
           saveLocalAuth(createdAccount, true);
         }}
@@ -2595,12 +2594,14 @@ function AuthenticatedApp() {
 function AuthGate({
   account,
   externalError,
+  externalMessage,
   onLogin,
   onCreate,
   onResetPassword,
 }: {
   account: AuthAccount;
   externalError?: string;
+  externalMessage?: string;
   onLogin: (account: AuthAccount) => void;
   onCreate: (account: AuthAccount) => void;
   onResetPassword: (account: AuthAccount) => void;
@@ -2620,6 +2621,7 @@ function AuthGate({
   const [activePolicy, setActivePolicy] = useState<PolicyKey | null>(null);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [pendingConfirmationEmail, setPendingConfirmationEmail] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const cardAnim = useEntranceAnimation(mode, reduceMotion);
   const isTablet = width >= TABLET_MIN_WIDTH;
@@ -2646,6 +2648,13 @@ function AuthGate({
     }
   }, [externalError]);
 
+  useEffect(() => {
+    if (externalMessage) {
+      setMessage(externalMessage);
+      setError('');
+    }
+  }, [externalMessage]);
+
   const clearFeedback = () => {
     setError('');
     setMessage('');
@@ -2657,6 +2666,7 @@ function AuthGate({
     setConfirmPassword('');
     setPasswordVisible(false);
     setTermsAccepted(false);
+    setPendingConfirmationEmail('');
     clearFeedback();
   };
 
@@ -2676,7 +2686,7 @@ function AuthGate({
     }
     const localMatches = matchesAccount(account);
     const defaultMatches = matchesAccount(DEFAULT_AUTH_ACCOUNT);
-    if (defaultMatches) {
+    if (!supabase && defaultMatches) {
       onLogin(DEFAULT_AUTH_ACCOUNT);
       return;
     }
@@ -2686,9 +2696,8 @@ function AuthGate({
         const email = await resolveEmailForIdentifier(identifier);
         const { data, error: signInError } = await supabase.auth.signInWithPassword({ email, password });
         if (signInError || !data.user) {
-          if (localMatches) {
-            onLogin(account);
-            return;
+          if (/email.*not.*confirm|confirm.*email|not confirmed/i.test(readableErrorMessage(signInError))) {
+            setPendingConfirmationEmail(email);
           }
           setError(signInError
             ? cleanAuthError(
@@ -2699,13 +2708,10 @@ function AuthGate({
             : 'Email/username or password is incorrect.');
           return;
         }
+        setPendingConfirmationEmail('');
         const profile = await getProfileForUser(data.user);
         onLogin({ ...buildAuthAccountFromUser(data.user, profile), password });
       } catch (authError) {
-        if (localMatches) {
-          onLogin(account);
-          return;
-        }
         setError(cleanAuthError(
           authError,
           'Unable to sign in.',
@@ -2783,13 +2789,20 @@ function AuthGate({
           return;
         }
 
+        let confirmationMessage = 'Account created. Check your email to confirm, then sign in with your email or username and password.';
         if (responseSession) {
           const profile = await upsertProfileForUser(responseUser, username, trimmedName, trimmedEmail);
-          onCreate({ ...buildAuthAccountFromUser(responseUser, profile), password });
-          return;
+          await supabase.auth.signOut().catch(() => undefined);
+          const createdAccount = { ...buildAuthAccountFromUser(responseUser, profile), password };
+          await AsyncStorage.setItem(
+            AUTH_STORAGE_KEY,
+            JSON.stringify({ account: createdAccount, signedIn: false }),
+          ).catch(() => undefined);
+          confirmationMessage = 'Account created, but Supabase email confirmation is turned off. Enable Confirm email in Supabase Auth before production, then create a new test account.';
         }
 
-        setMessage('Account created. Check your email to confirm, then sign in.');
+        setPendingConfirmationEmail(trimmedEmail);
+        setMessage(confirmationMessage);
         setMode('signIn');
         setIdentifier(trimmedEmail);
         setEmail('');
@@ -2809,6 +2822,45 @@ function AuthGate({
       return;
     }
     onCreate(buildLocalAuthAccount(username, password, trimmedEmail, trimmedName));
+  };
+
+  const resendConfirmation = async () => {
+    const resendEmail = (pendingConfirmationEmail || identifier).trim().toLowerCase();
+    clearFeedback();
+    if (!supabase) {
+      setError('Email confirmation is available only when Supabase Auth is configured.');
+      return;
+    }
+    if (!isValidEmail(resendEmail)) {
+      setError('Enter the email address you used to create the account.');
+      return;
+    }
+    try {
+      setSubmitting(true);
+      const { error: resendError } = await supabase.auth.resend({
+        type: 'signup',
+        email: resendEmail,
+        options: authRedirectUrl ? { emailRedirectTo: authRedirectUrl } : undefined,
+      });
+      if (resendError) {
+        setError(cleanAuthError(
+          resendError,
+          'Unable to resend confirmation email.',
+          'Secure connection to Supabase failed on this device, so the confirmation email was not sent. Check automatic date/time, update Android System WebView or Chrome, try another network, then try again.',
+        ));
+        return;
+      }
+      setPendingConfirmationEmail(resendEmail);
+      setMessage('Confirmation email sent again. Open the email, confirm, then sign in.');
+    } catch (authError) {
+      setError(cleanAuthError(
+        authError,
+        'Unable to resend confirmation email.',
+        'Secure connection to Supabase failed on this device, so the confirmation email was not sent. Check automatic date/time, update Android System WebView or Chrome, try another network, then try again.',
+      ));
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const submitReset = async () => {
@@ -2950,6 +3002,7 @@ function AuthGate({
                         value={email}
                         onChangeText={(value) => {
                           setEmail(value);
+                          setPendingConfirmationEmail('');
                           clearFeedback();
                         }}
                         placeholder="you@rituals.app"
@@ -3011,6 +3064,7 @@ function AuthGate({
                         value={identifier}
                         onChangeText={(value) => {
                           setIdentifier(value);
+                          setPendingConfirmationEmail('');
                           clearFeedback();
                         }}
                         placeholder="Pratik or pratik@rituals.app"
@@ -3063,6 +3117,16 @@ function AuthGate({
 
                   {error ? <Text style={styles.authError}>{error}</Text> : null}
                   {message ? <Text style={styles.authMessage}>{message}</Text> : null}
+                  {usesSupabaseAuth && !isCreate && !isReset && pendingConfirmationEmail ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      disabled={submitting}
+                      onPress={resendConfirmation}
+                      style={styles.authResendButton}
+                    >
+                      <Text style={styles.authInlineLink}>Resend confirmation email</Text>
+                    </Pressable>
+                  ) : null}
 
                   <PressScale
                     reduceMotion={reduceMotion}
@@ -8739,6 +8803,12 @@ const styles = StyleSheet.create({
     fontFamily: fontBodyBold,
     fontSize: 12.5,
     color: colors.blue1,
+  },
+  authResendButton: {
+    alignSelf: 'flex-start',
+    marginTop: -4,
+    marginBottom: 10,
+    paddingVertical: 6,
   },
   authCheckLine: {
     flexDirection: 'row',
