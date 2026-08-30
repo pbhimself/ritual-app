@@ -2,8 +2,8 @@
   "expo": {
     "name": "Rituals Habit",
     "slug": "ritual-app",
-    "scheme": "com.bhang.ritual",
-    "version": "1.0.6",
+    "scheme": "com.pratikbhangale.rituals",
+    "version": "1.0.8",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
@@ -11,8 +11,8 @@
       "supportsTablet": true
     },
     "android": {
-      "package": "com.bhang.ritual",
-      "versionCode": 7,
+      "package": "com.pratikbhangale.rituals",
+      "versionCode": 9,
       "permissions": [
         "android.permission.POST_NOTIFICATIONS"
       ],

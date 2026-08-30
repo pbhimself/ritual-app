@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { withAndroidManifest, withDangerousMod } = require('@expo/config-plugins');
 
-const APP_SCHEME = 'com.bhang.ritual';
+const APP_SCHEME = 'com.pratikbhangale.rituals';
 const DEFAULT_SUPABASE_URL = 'https://jzdrckmocagdhmlksnmz.supabase.co';
 const DEFAULT_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_0wzptlM9-QpVGwdJSkPtsQ_HDE0Xr47';
 const NETWORK_SECURITY_CONFIG = `<?xml version="1.0" encoding="utf-8"?>
