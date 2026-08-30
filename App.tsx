@@ -2684,10 +2684,8 @@ function AuthGate({
       setError('Enter your email or username and password.');
       return;
     }
-    const localMatches = matchesAccount(account);
-    const defaultMatches = matchesAccount(DEFAULT_AUTH_ACCOUNT);
-    if (!supabase && defaultMatches) {
-      onLogin(DEFAULT_AUTH_ACCOUNT);
+    if (!supabase) {
+      setError('Secure sign-in is not configured. Add Supabase settings, then restart the app.');
       return;
     }
     if (supabase) {
@@ -2722,11 +2720,6 @@ function AuthGate({
       }
       return;
     }
-    if (localMatches) {
-      onLogin(account);
-      return;
-    }
-    setError('Email/username or password is incorrect.');
   };
 
   const submitCreate = async () => {
@@ -2821,7 +2814,7 @@ function AuthGate({
       }
       return;
     }
-    onCreate(buildLocalAuthAccount(username, password, trimmedEmail, trimmedName));
+    setError('Email signup is not configured. Add EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY, then restart the app.');
   };
 
   const resendConfirmation = async () => {
