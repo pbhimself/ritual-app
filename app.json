@@ -3,7 +3,7 @@
     "name": "Rituals Habit",
     "slug": "ritual-app",
     "scheme": "com.pratikbhangale.rituals",
-    "version": "1.0.8",
+    "version": "1.0.9",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
@@ -12,7 +12,7 @@
     },
     "android": {
       "package": "com.pratikbhangale.rituals",
-      "versionCode": 9,
+      "versionCode": 10,
       "permissions": [
         "android.permission.POST_NOTIFICATIONS"
       ],

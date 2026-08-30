@@ -1,23 +1,13 @@
 import 'react-native-url-polyfill/auto';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Fraunces_400Regular } from '@expo-google-fonts/fraunces/400Regular';
-import { Fraunces_500Medium } from '@expo-google-fonts/fraunces/500Medium';
-import { Fraunces_600SemiBold } from '@expo-google-fonts/fraunces/600SemiBold';
-import { PlusJakartaSans_400Regular } from '@expo-google-fonts/plus-jakarta-sans/400Regular';
-import { PlusJakartaSans_500Medium } from '@expo-google-fonts/plus-jakarta-sans/500Medium';
-import { PlusJakartaSans_600SemiBold } from '@expo-google-fonts/plus-jakarta-sans/600SemiBold';
-import { useFonts } from 'expo-font';
 import { BlurView } from 'expo-blur';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
-import { NavigationBar } from 'expo-navigation-bar';
-import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import Constants from 'expo-constants';
 import * as ExpoLinking from 'expo-linking';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import {
-  AccessibilityInfo,
   Animated,
   AppState,
   Dimensions,
@@ -25,6 +15,7 @@ import {
   FlatList,
   KeyboardAvoidingView,
   Linking,
+  LogBox,
   Modal,
   Platform,
   Pressable,
@@ -37,13 +28,15 @@ import {
 } from 'react-native';
 import type { StyleProp, ViewStyle } from 'react-native';
 import {
-  GestureHandlerRootView,
   PanGestureHandler,
   State,
   type PanGestureHandlerGestureEvent,
   type PanGestureHandlerStateChangeEvent,
 } from 'react-native-gesture-handler';
-import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import AppBootstrap from './src/components/AppBootstrap';
+import LaunchSplash from './src/components/LaunchSplash';
+import { useEntranceAnimation, useReducedMotion } from './src/hooks/motion';
 import Reanimated, {
   cancelAnimation,
   Easing as ReanimatedEasing,
@@ -513,16 +506,36 @@ const supabaseAnonKey = readRuntimeString(
 );
 const nativeAuthRedirectUrl = `${APP_SCHEME}://${AUTH_CALLBACK_PATH}`;
 const authRedirectUrl = Platform.OS === 'web' && typeof window !== 'undefined' ? window.location.origin : nativeAuthRedirectUrl;
-const supabase = supabaseUrl && supabaseAnonKey
-  ? createClient(supabaseUrl, supabaseAnonKey, {
+
+function createSupabaseClient() {
+  if (!supabaseUrl || !supabaseAnonKey) {
+    return null;
+  }
+
+  const globalKey = '__ritualsSupabaseClient';
+  const globalScope = globalThis as typeof globalThis & Record<string, SupabaseClient | undefined>;
+  if (Platform.OS === 'web' && globalScope[globalKey]) {
+    return globalScope[globalKey];
+  }
+
+  const client = createClient(supabaseUrl, supabaseAnonKey, {
       auth: {
         ...(Platform.OS !== 'web' ? { storage: AsyncStorage } : {}),
         autoRefreshToken: true,
         persistSession: true,
         detectSessionInUrl: Platform.OS === 'web',
       },
-    })
-  : null;
+    });
+
+  if (Platform.OS !== 'web') {
+    return client;
+  }
+
+  globalScope[globalKey] = client;
+  return client;
+}
+
+const supabase = createSupabaseClient();
 
 function isExpoGoRuntime() {
   return Constants.appOwnership === 'expo';
@@ -543,7 +556,11 @@ function getNotificationsModule() {
 
 const notificationsModule = getNotificationsModule();
 
-SplashScreen.preventAutoHideAsync().catch(() => undefined);
+const AUTH_STARTUP_TIMEOUT_MS = 10000;
+
+if (Platform.OS === 'web') {
+  LogBox.ignoreLogs(['"shadow*" style props are deprecated. Use "boxShadow".']);
+}
 
 notificationsModule?.setNotificationHandler({
   handleNotification: async () => ({
@@ -762,7 +779,6 @@ const defaultState: SavedFlowState = {
 };
 
 const AnimatedCircle = Animated.createAnimatedComponent(Circle);
-const AnimatedPath = Animated.createAnimatedComponent(Path);
 const webReminderTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function clamp(value: number, min: number, max: number) {
@@ -1563,6 +1579,13 @@ function authAccountFromUser(user: SupabaseUser, profile?: Partial<SupabaseProfi
 
 const buildAuthAccountFromUser = authAccountFromUser;
 
+function provisionalAuthAccountFromUser(user: SupabaseUser): AuthAccount {
+  return {
+    ...authAccountFromUser(user, { profile_complete: true }),
+    starterOnboardingPending: false,
+  };
+}
+
 function shouldPromptProfileSetup(account: AuthAccount) {
   return account.profileComplete === false && !account.profileSetupSkipped;
 }
@@ -2034,316 +2057,15 @@ async function loadSupabaseFlowState(userId: string): Promise<Partial<SavedFlowS
   };
 }
 
-function useReducedMotion() {
-  const [reduceMotion, setReduceMotion] = useState(false);
-
-  useEffect(() => {
-    AccessibilityInfo.isReduceMotionEnabled()
-      .then(setReduceMotion)
-      .catch(() => undefined);
-    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotion);
-    return () => subscription.remove();
-  }, []);
-
-  return reduceMotion;
-}
-
-function useEntranceAnimation(trigger: string | number, reduceMotion: boolean) {
-  const progress = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    progress.setValue(0);
-    Animated.timing(progress, {
-      toValue: 1,
-      duration: reduceMotion ? 1 : 400,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start();
-  }, [progress, reduceMotion, trigger]);
-
-  return {
-    opacity: progress,
-    transform: [
-      {
-        translateY: progress.interpolate({
-          inputRange: [0, 1],
-          outputRange: [14, 0],
-        }),
-      },
-    ],
-  };
-}
-
 function AppRoot() {
-  const [fontsLoaded] = useFonts({
-    Fraunces_400Regular,
-    Fraunces_500Medium,
-    Fraunces_600SemiBold,
-    PlusJakartaSans_400Regular,
-    PlusJakartaSans_500Medium,
-    PlusJakartaSans_600SemiBold,
-  });
-  const reduceMotion = useReducedMotion();
-  const [showSplash, setShowSplash] = useState(true);
-
-  useEffect(() => {
-    if (!fontsLoaded) {
-      return undefined;
-    }
-    SplashScreen.hideAsync().catch(() => undefined);
-    const timer = setTimeout(() => setShowSplash(false), reduceMotion ? 900 : 2800);
-    return () => clearTimeout(timer);
-  }, [fontsLoaded, reduceMotion]);
-
-  if (!fontsLoaded) {
-    return <View style={styles.loadingRoot} />;
-  }
-
   return (
-    <GestureHandlerRootView style={styles.root}>
-      <SafeAreaProvider>
-        <NavigationBar hidden={false} style="dark" />
-        <AuthenticatedApp />
-        {showSplash ? <LaunchSplash reduceMotion={reduceMotion} onSkip={() => setShowSplash(false)} /> : null}
-      </SafeAreaProvider>
-    </GestureHandlerRootView>
+    <AppBootstrap>
+      <AuthenticatedApp />
+    </AppBootstrap>
   );
 }
 
 export default AppRoot;
-
-function LaunchSplash({ reduceMotion, onSkip }: { reduceMotion: boolean; onSkip: () => void }) {
-  const opacity = useRef(new Animated.Value(1)).current;
-  const copy = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    Animated.timing(copy, {
-      toValue: 1,
-      delay: reduceMotion ? 0 : 1650,
-      duration: reduceMotion ? 1 : 500,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start();
-  }, [copy, reduceMotion]);
-
-  const dismiss = () => {
-    Animated.timing(opacity, {
-      toValue: 0,
-      duration: reduceMotion ? 1 : 260,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start(onSkip);
-  };
-
-  return (
-    <Animated.View style={[styles.launchSplash, { opacity }]}>
-      <Pressable accessibilityRole="button" accessibilityLabel="Skip launch animation" onPress={dismiss} style={styles.launchSkip}>
-        <Text style={styles.launchSkipText}>Skip</Text>
-      </Pressable>
-      <RitualsMark size={180} color="#F4F8FF" mode="launch" reduceMotion={reduceMotion} style={styles.launchMarkWrap} />
-      <Animated.View
-        style={[
-          styles.launchCopy,
-          {
-            opacity: copy,
-            transform: [{ translateY: copy.interpolate({ inputRange: [0, 1], outputRange: [8, 0] }) }],
-          },
-        ]}
-      >
-        <Text style={styles.launchTitle}>Rituals</Text>
-        <Text style={styles.launchTagline}>Small rituals · Steady flow</Text>
-      </Animated.View>
-      <View style={styles.launchLoadingRow}>
-        <RitualsMark size={18} color="#7C8AA6" mode="spinner" reduceMotion={reduceMotion} />
-        <Text style={styles.launchLoadingText}>Loading your rituals...</Text>
-      </View>
-    </Animated.View>
-  );
-}
-
-function RitualsMark({
-  size,
-  color,
-  mode,
-  reduceMotion,
-  style,
-}: {
-  size: number;
-  color: string;
-  mode: 'launch' | 'spinner' | 'static';
-  reduceMotion: boolean;
-  style?: StyleProp<ViewStyle>;
-}) {
-  const circleDash = useRef(new Animated.Value(mode === 'launch' && !reduceMotion ? 430 : 0)).current;
-  const coilLongDash = useRef(new Animated.Value(mode === 'launch' && !reduceMotion ? 520 : 0)).current;
-  const coilStubDash = useRef(new Animated.Value(mode === 'launch' && !reduceMotion ? 90 : 0)).current;
-  const waveDash = useRef(new Animated.Value(mode === 'launch' && !reduceMotion ? 190 : 0)).current;
-  const dotOpacity = useRef(new Animated.Value(mode === 'launch' && !reduceMotion ? 0 : 1)).current;
-  const breathe = useRef(new Animated.Value(1)).current;
-
-  useEffect(() => {
-    circleDash.stopAnimation();
-    coilLongDash.stopAnimation();
-    coilStubDash.stopAnimation();
-    waveDash.stopAnimation();
-    dotOpacity.stopAnimation();
-    breathe.stopAnimation();
-
-    if (reduceMotion || mode === 'static') {
-      circleDash.setValue(0);
-      coilLongDash.setValue(0);
-      coilStubDash.setValue(0);
-      waveDash.setValue(0);
-      dotOpacity.setValue(1);
-      breathe.setValue(1);
-      return undefined;
-    }
-
-    const flowLoop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(waveDash, {
-          toValue: -6,
-          duration: 1400,
-          easing: Easing.inOut(Easing.quad),
-          useNativeDriver: false,
-        }),
-        Animated.timing(waveDash, {
-          toValue: 0,
-          duration: 1400,
-          easing: Easing.inOut(Easing.quad),
-          useNativeDriver: false,
-        }),
-      ]),
-    );
-
-    if (mode === 'spinner') {
-      circleDash.setValue(0);
-      coilLongDash.setValue(0);
-      coilStubDash.setValue(0);
-      waveDash.setValue(0);
-      dotOpacity.setValue(1);
-      flowLoop.start();
-      return () => flowLoop.stop();
-    }
-
-    circleDash.setValue(430);
-    coilLongDash.setValue(520);
-    coilStubDash.setValue(90);
-    waveDash.setValue(190);
-    dotOpacity.setValue(0);
-    breathe.setValue(1);
-
-    const draw = Animated.parallel([
-      Animated.timing(circleDash, {
-        toValue: 0,
-        duration: 900,
-        easing: Easing.bezier(0.4, 0, 0.2, 1),
-        useNativeDriver: false,
-      }),
-      Animated.timing(coilLongDash, {
-        toValue: 0,
-        delay: 250,
-        duration: 800,
-        easing: Easing.bezier(0.4, 0, 0.2, 1),
-        useNativeDriver: false,
-      }),
-      Animated.timing(coilStubDash, {
-        toValue: 0,
-        delay: 950,
-        duration: 400,
-        easing: Easing.bezier(0.4, 0, 0.2, 1),
-        useNativeDriver: false,
-      }),
-      Animated.timing(waveDash, {
-        toValue: 0,
-        delay: 700,
-        duration: 900,
-        easing: Easing.bezier(0.4, 0, 0.2, 1),
-        useNativeDriver: false,
-      }),
-      Animated.timing(dotOpacity, {
-        toValue: 1,
-        delay: 1550,
-        duration: 300,
-        easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
-      }),
-    ]);
-
-    const breatheLoop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(breathe, {
-          toValue: 1.035,
-          duration: 1800,
-          easing: Easing.inOut(Easing.quad),
-          useNativeDriver: true,
-        }),
-        Animated.timing(breathe, {
-          toValue: 1,
-          duration: 1800,
-          easing: Easing.inOut(Easing.quad),
-          useNativeDriver: true,
-        }),
-      ]),
-    );
-
-    draw.start(() => {
-      flowLoop.start();
-      breatheLoop.start();
-    });
-
-    return () => {
-      flowLoop.stop();
-      breatheLoop.stop();
-    };
-  }, [breathe, circleDash, coilLongDash, coilStubDash, dotOpacity, mode, reduceMotion, waveDash]);
-
-  return (
-    <Animated.View style={[{ width: size, height: Math.round(size * 1.07), transform: [{ scale: breathe }] }, style]}>
-      <Svg width="100%" height="100%" viewBox="0 0 200 214" fill="none">
-        <AnimatedPath
-          d="M 83,27 A 82,82 0 1 1 72,184"
-          stroke={color}
-          strokeWidth="7"
-          strokeLinecap="round"
-          fill="none"
-          strokeDasharray={520}
-          strokeDashoffset={coilLongDash as unknown as number}
-        />
-        <AnimatedPath
-          d="M 65,181 A 82,82 0 0 1 35,158"
-          stroke={color}
-          strokeWidth="7"
-          strokeLinecap="round"
-          fill="none"
-          strokeDasharray={90}
-          strokeDashoffset={coilStubDash as unknown as number}
-        />
-        <AnimatedCircle
-          cx="100"
-          cy="107"
-          r="68"
-          stroke={color}
-          strokeWidth="7"
-          fill="none"
-          strokeDasharray={430}
-          strokeDashoffset={circleDash as unknown as number}
-        />
-        <AnimatedPath
-          d="M 40,107 C 60,80 80,80 100,107 C 120,134 140,134 160,107"
-          stroke={color}
-          strokeWidth="7"
-          strokeLinecap="round"
-          fill="none"
-          strokeDasharray={190}
-          strokeDashoffset={waveDash as unknown as number}
-        />
-        <AnimatedCircle cx="40" cy="107" r="5" fill={color} opacity={dotOpacity as unknown as number} />
-        <AnimatedCircle cx="160" cy="107" r="5" fill={color} opacity={dotOpacity as unknown as number} />
-      </Svg>
-    </Animated.View>
-  );
-}
 
 function AuthenticatedApp() {
   const [ready, setReady] = useState(false);
@@ -2356,20 +2078,52 @@ function AuthenticatedApp() {
 
   useEffect(() => {
     let mounted = true;
+    let readyReleased = false;
+    let startupTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const releaseStartup = () => {
+      if (startupTimer) {
+        clearTimeout(startupTimer);
+        startupTimer = undefined;
+      }
+      readyReleased = true;
+      setReady(true);
+    };
+
+    startupTimer = setTimeout(() => {
+      if (!mounted || readyReleased) {
+        return;
+      }
+      readyReleased = true;
+      startupTimer = undefined;
+      setAuthGateError('Startup is taking longer than expected.');
+      setAuthGateMessage('If this repeats, update Chrome / Android System WebView and try again with stable internet.');
+      setReady(true);
+    }, AUTH_STARTUP_TIMEOUT_MS);
 
     const hydrate = async () => {
       if (supabase) {
         try {
           const { data } = await supabase.auth.getSession();
           if (data.session?.user) {
-            const profile = await getProfileForUser(data.session.user);
-            const nextAccount = buildAuthAccountFromUser(data.session.user, profile);
+            const sessionUser = data.session.user;
+            const nextAccount = provisionalAuthAccountFromUser(sessionUser);
             if (mounted) {
               setAccount(nextAccount);
               setSignedIn(true);
-              setProfileSetupSource(profileSetupSourceForAccount(nextAccount));
-              setReady(true);
+              setProfileSetupSource(null);
+              releaseStartup();
             }
+            getProfileForUser(sessionUser)
+              .then((profile) => {
+                if (!mounted) {
+                  return;
+                }
+                const profiledAccount = buildAuthAccountFromUser(sessionUser, profile);
+                setAccount(profiledAccount);
+                setProfileSetupSource(profileSetupSourceForAccount(profiledAccount));
+              })
+              .catch(() => undefined);
             return;
           }
         } catch (error) {
@@ -2382,7 +2136,7 @@ function AuthenticatedApp() {
           }
         }
         if (mounted) {
-          setReady(true);
+          releaseStartup();
         }
         return;
       }
@@ -2395,13 +2149,13 @@ function AuthenticatedApp() {
         if (parsed.signedIn && parsed.account.profileComplete === false && !parsed.account.profileSetupSkipped) {
           setProfileSetupSource(profileSetupSourceForAccount(parsed.account));
         }
-        setReady(true);
+        releaseStartup();
       }
     };
 
     hydrate().catch(() => {
       if (mounted) {
-        setReady(true);
+        releaseStartup();
       }
     });
 
@@ -2414,13 +2168,23 @@ function AuthenticatedApp() {
         setProfileSetupSource(null);
         return;
       }
-      const profile = await getProfileForUser(session.user);
-      const nextAccount = buildAuthAccountFromUser(session.user, profile);
+      const eventUser = session.user;
+      const nextAccount = provisionalAuthAccountFromUser(eventUser);
       if (mounted) {
         setAccount(nextAccount);
         setSignedIn(true);
-        setProfileSetupSource(profileSetupSourceForAccount(nextAccount));
+        setProfileSetupSource(null);
       }
+      getProfileForUser(eventUser)
+        .then((profile) => {
+          if (!mounted) {
+            return;
+          }
+          const profiledAccount = buildAuthAccountFromUser(eventUser, profile);
+          setAccount(profiledAccount);
+          setProfileSetupSource(profileSetupSourceForAccount(profiledAccount));
+        })
+        .catch(() => undefined);
     }).data.subscription;
 
     const appStateSubscription = supabase && Platform.OS !== 'web'
@@ -2435,6 +2199,9 @@ function AuthenticatedApp() {
 
     return () => {
       mounted = false;
+      if (startupTimer) {
+        clearTimeout(startupTimer);
+      }
       authSubscription?.unsubscribe();
       appStateSubscription?.remove();
     };
@@ -2464,8 +2231,8 @@ function AuthenticatedApp() {
         if (!session?.user || !mounted) {
           return;
         }
-        const profile = await getProfileForUser(session.user);
-        const nextAccount = buildAuthAccountFromUser(session.user, profile);
+        const sessionUser = session.user;
+        const nextAccount = provisionalAuthAccountFromUser(sessionUser);
         if (!mounted) {
           return;
         }
@@ -2473,9 +2240,20 @@ function AuthenticatedApp() {
         setAuthGateMessage('');
         setAccount(nextAccount);
         setSignedIn(true);
-        setProfileSetupSource(profileSetupSourceForAccount(nextAccount));
+        setProfileSetupSource(null);
         setReady(true);
         saveLocalAuth(nextAccount, true);
+        getProfileForUser(sessionUser)
+          .then((profile) => {
+            if (!mounted) {
+              return;
+            }
+            const profiledAccount = buildAuthAccountFromUser(sessionUser, profile);
+            setAccount(profiledAccount);
+            setProfileSetupSource(profileSetupSourceForAccount(profiledAccount));
+            saveLocalAuth(profiledAccount, true);
+          })
+          .catch(() => undefined);
         ExpoLinking.clearInitialURL?.();
       } catch (error) {
         if (mounted) {
@@ -2533,7 +2311,12 @@ function AuthenticatedApp() {
   }, [account, profileSetupSource, saveLocalAuth]);
 
   if (!ready) {
-    return <View style={styles.loadingRoot} />;
+    return (
+      <LaunchSplash
+        reduceMotion={reduceMotion}
+        message="Checking your session..."
+      />
+    );
   }
 
   if (!signedIn) {
@@ -3877,7 +3660,14 @@ function AuthHero({ mode, reduceMotion, split = false }: { mode: AuthMode; reduc
 
 function AnimatedWaveBackground({ reduceMotion, compact }: { reduceMotion: boolean; compact: boolean }) {
   const drift = useSharedValue(0);
-  const width = 420;
+  const { width: screenWidth } = useWindowDimensions();
+  const tileWidth = 420;
+  const waveHeight = compact ? 96 : 170;
+  const waveWidth = Math.ceil(Math.max(screenWidth + tileWidth * 2, tileWidth * 3) / 105) * 105;
+  const wavePath = useMemo(
+    () => buildAuthWavePath(waveWidth, waveHeight, compact ? 44 : 78, compact ? 24 : 48),
+    [compact, waveHeight, waveWidth],
+  );
 
   useEffect(() => {
     if (reduceMotion) {
@@ -3886,12 +3676,12 @@ function AnimatedWaveBackground({ reduceMotion, compact }: { reduceMotion: boole
       return;
     }
     drift.value = withRepeat(
-      withTiming(-width, { duration: compact ? 7000 : 6800, easing: ReanimatedEasing.linear }),
+      withTiming(-tileWidth, { duration: compact ? 7000 : 6800, easing: ReanimatedEasing.linear }),
       -1,
       false,
     );
     return () => cancelAnimation(drift);
-  }, [compact, drift, reduceMotion, width]);
+  }, [compact, drift, reduceMotion, tileWidth]);
 
   const waveStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: drift.value }],
@@ -3900,24 +3690,30 @@ function AnimatedWaveBackground({ reduceMotion, compact }: { reduceMotion: boole
   return (
     <View style={[styles.authWaveHost, compact && styles.authWaveHostCompact]}>
       <LinearGradient colors={['#F5FAFF', colors.blue2]} style={StyleSheet.absoluteFill} />
-      <Reanimated.View style={[styles.authWaveSvgWrap, { width: width * 2 }, waveStyle]}>
-        <Svg width={width * 2} height={compact ? 96 : 170} viewBox={`0 0 ${width * 2} ${compact ? 96 : 170}`} preserveAspectRatio="none">
+      <Reanimated.View style={[styles.authWaveSvgWrap, { width: waveWidth }, waveStyle]}>
+        <Svg width={waveWidth} height={waveHeight} viewBox={`0 0 ${waveWidth} ${waveHeight}`} preserveAspectRatio="none">
           <Defs>
             <SvgLinearGradient id="authWaveGrad" x1="0" y1="0" x2="0" y2="1">
               <Stop offset="0%" stopColor={colors.blue2} />
               <Stop offset="100%" stopColor={colors.blue1} />
             </SvgLinearGradient>
           </Defs>
-          <Path
-            d={compact
-              ? `M0 44 Q 52 24 105 44 T 210 44 T 315 44 T 420 44 T 525 44 T 630 44 T 735 44 T 840 44 V96 H0 Z`
-              : `M0 78 Q 52 48 105 78 T 210 78 T 315 78 T 420 78 T 525 78 T 630 78 T 735 78 T 840 78 V170 H0 Z`}
-            fill="url(#authWaveGrad)"
-          />
+          <Path d={wavePath} fill="url(#authWaveGrad)" />
         </Svg>
       </Reanimated.View>
     </View>
   );
+}
+
+function buildAuthWavePath(width: number, height: number, baseline: number, peak: number) {
+  const segment = 105;
+  const halfSegment = segment / 2;
+  const end = Math.ceil(width / segment) * segment;
+  let path = `M0 ${baseline} Q ${halfSegment} ${peak} ${segment} ${baseline}`;
+  for (let x = segment * 2; x <= end; x += segment) {
+    path += ` T ${x} ${baseline}`;
+  }
+  return `${path} V${height} H0 Z`;
 }
 
 function LogoMark({
@@ -4020,11 +3816,7 @@ function AuthInput({
   return (
     <View style={styles.authField}>
       <Text style={styles.authFieldLabel}>{label}</Text>
-      <Pressable
-        accessibilityRole="button"
-        onPress={() => inputRef.current?.focus()}
-        style={[styles.authInputShell, focused && styles.authInputShellFocused, error && styles.authInputShellError]}
-      >
+      <View style={[styles.authInputShell, focused && styles.authInputShellFocused, error && styles.authInputShellError]}>
         <Icon size={18} color={colors.inkFaint} strokeWidth={2.3} />
         <TextInput
           ref={inputRef}
@@ -4047,7 +3839,7 @@ function AuthInput({
           style={styles.authInput}
         />
         {trailing}
-      </Pressable>
+      </View>
       {helperText ? <Text style={styles.authHelperError}>{helperText}</Text> : null}
     </View>
   );
@@ -6008,7 +5800,7 @@ function TimelineMarker({
       toValue: 1,
       speed: 16,
       bounciness: 10,
-      useNativeDriver: true,
+      useNativeDriver: Platform.OS !== 'web',
     }).start();
   }, [scale]);
 
@@ -6017,7 +5809,7 @@ function TimelineMarker({
       toValue: visibleTooltip ? 1 : 0,
       duration: 160,
       easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
+      useNativeDriver: Platform.OS !== 'web',
     }).start();
   }, [tooltip, visibleTooltip]);
 
@@ -6071,7 +5863,7 @@ function RitualCard({
       toValue: 1,
       duration: reduceMotion ? 1 : 400,
       easing: Easing.out(Easing.back(1.2)),
-      useNativeDriver: true,
+      useNativeDriver: Platform.OS !== 'web',
     }).start();
   }, [enter, entering, reduceMotion]);
 
@@ -6082,7 +5874,7 @@ function RitualCard({
         toValue: 1,
         duration: reduceMotion ? 1 : 480,
         easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
+        useNativeDriver: Platform.OS !== 'web',
       }).start();
     }
     previousDone.current = ritual.doneToday;
@@ -6094,13 +5886,13 @@ function RitualCard({
         toValue: 0.85,
         duration: reduceMotion ? 1 : 75,
         easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
+        useNativeDriver: Platform.OS !== 'web',
       }),
       Animated.spring(checkScale, {
         toValue: 1,
         speed: 22,
         bounciness: 8,
-        useNativeDriver: true,
+        useNativeDriver: Platform.OS !== 'web',
       }),
     ]).start();
     onToggle(ritual.id, x, y);
@@ -6137,7 +5929,7 @@ function RitualCard({
             toValue: 0.97,
             duration: reduceMotion ? 1 : 120,
             easing: Easing.out(Easing.cubic),
-            useNativeDriver: true,
+            useNativeDriver: Platform.OS !== 'web',
           }).start();
         }}
         onPressOut={() => {
@@ -6145,7 +5937,7 @@ function RitualCard({
             toValue: 1,
             speed: 28,
             bounciness: 6,
-            useNativeDriver: true,
+            useNativeDriver: Platform.OS !== 'web',
           }).start();
         }}
         style={styles.ritualPress}
@@ -6235,7 +6027,7 @@ function RitualTimeBadge({
       toValue: 1,
       duration: reduceMotion ? 1 : 250,
       easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
+      useNativeDriver: Platform.OS !== 'web',
     }).start();
   }, [progress, reduceMotion]);
 
@@ -6949,7 +6741,7 @@ function LiquidRing({
       toValue: ((100 - visualPercent) / 100) * liquidSize,
       duration: reduceMotion ? 140 : 1000,
       easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
+      useNativeDriver: Platform.OS !== 'web',
     }).start();
   }, [level, liquidSize, reduceMotion, visualPercent]);
 
@@ -6991,7 +6783,7 @@ function LiquidRing({
         toValue: -liquidSize,
         duration: 3400,
         easing: Easing.linear,
-        useNativeDriver: true,
+        useNativeDriver: Platform.OS !== 'web',
       }),
       { resetBeforeIteration: true },
     );
@@ -7010,18 +6802,33 @@ function LiquidRing({
             </SvgLinearGradient>
           </Defs>
           <Circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke={trackColor} strokeWidth={stroke} />
-          <AnimatedCircle
-            cx={size / 2}
-            cy={size / 2}
-            r={radius}
-            fill="none"
-            stroke={`url(#arc-${ringId})`}
-            strokeWidth={stroke}
-            strokeLinecap="round"
-            strokeDasharray={circumference}
-            strokeDashoffset={arcOffset as unknown as number}
-            transform={`rotate(-90 ${size / 2} ${size / 2})`}
-          />
+          {Platform.OS === 'web' ? (
+            <Circle
+              cx={size / 2}
+              cy={size / 2}
+              r={radius}
+              fill="none"
+              stroke={`url(#arc-${ringId})`}
+              strokeWidth={stroke}
+              strokeLinecap="round"
+              strokeDasharray={circumference}
+              strokeDashoffset={circumference * (1 - clamp(percent, 0, 100) / 100)}
+              transform={`rotate(-90 ${size / 2} ${size / 2})`}
+            />
+          ) : (
+            <AnimatedCircle
+              cx={size / 2}
+              cy={size / 2}
+              r={radius}
+              fill="none"
+              stroke={`url(#arc-${ringId})`}
+              strokeWidth={stroke}
+              strokeLinecap="round"
+              strokeDasharray={circumference}
+              strokeDashoffset={arcOffset as unknown as number}
+              transform={`rotate(-90 ${size / 2} ${size / 2})`}
+            />
+          )}
         </Svg>
       ) : null}
       <View
@@ -7041,13 +6848,13 @@ function LiquidRing({
           style={[
             styles.waveLayer,
             {
-              width: liquidSize * 2,
+              width: liquidSize * 3,
               height: liquidSize * 1.24,
               transform: [{ translateX: drift }, { translateY: level }],
             },
           ]}
         >
-          <Svg width={liquidSize * 2} height={liquidSize * 1.24} viewBox="-50 0 200 110" preserveAspectRatio="none">
+          <Svg width={liquidSize * 3} height={liquidSize * 1.24} viewBox="0 0 300 110" preserveAspectRatio="none">
             <Defs>
               <SvgLinearGradient id={`wave-${ringId}`} x1="0" y1="0" x2="0" y2="1">
                 <Stop offset="0%" stopColor={palette.b} />
@@ -7056,7 +6863,7 @@ function LiquidRing({
             </Defs>
             <G>
               <Path
-                d="M-50 6 Q -37.5 -2 -25 6 T 0 6 T 25 6 T 50 6 T 75 6 T100 6 T125 6 T150 6 V110 H-50 Z"
+                d="M0 6 Q12.5 -2 25 6 T50 6 T75 6 T100 6 T125 6 T150 6 T175 6 T200 6 T225 6 T250 6 T275 6 T300 6 V110 H0 Z"
                 fill={`url(#wave-${ringId})`}
               />
             </G>
@@ -7330,7 +7137,7 @@ function HeatCell({
       delay: reduceMotion ? 0 : delay,
       duration: reduceMotion ? 1 : 350,
       easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
+      useNativeDriver: Platform.OS !== 'web',
     }).start();
   }, [delay, progress, reduceMotion, trigger]);
 
@@ -7814,7 +7621,7 @@ function BottomNav({
       toValue: 1,
       duration: reduceMotion ? 1 : 520,
       easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
+      useNativeDriver: Platform.OS !== 'web',
     }).start();
   }, [mounted, reduceMotion]);
 
@@ -7823,7 +7630,7 @@ function BottomNav({
       toValue: activeIndex,
       speed: reduceMotion ? 100 : 18,
       bounciness: reduceMotion ? 0 : 8,
-      useNativeDriver: true,
+      useNativeDriver: Platform.OS !== 'web',
     }).start();
   }, [activeIndex, indicator, reduceMotion]);
 
@@ -8038,13 +7845,13 @@ function AddRitualSheet({
           toValue: 1,
           duration: reduceMotion ? 1 : 250,
           easing: Easing.out(Easing.cubic),
-          useNativeDriver: true,
+          useNativeDriver: Platform.OS !== 'web',
         }),
         Animated.timing(sheetY, {
           toValue: 0,
           duration: reduceMotion ? 1 : 320,
           easing: Easing.out(Easing.cubic),
-          useNativeDriver: true,
+          useNativeDriver: Platform.OS !== 'web',
         }),
       ]).start();
       return;
@@ -8054,13 +7861,13 @@ function AddRitualSheet({
         toValue: 0,
         duration: reduceMotion ? 1 : 220,
         easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
+        useNativeDriver: Platform.OS !== 'web',
       }),
       Animated.timing(sheetY, {
         toValue: 420,
         duration: reduceMotion ? 1 : 260,
         easing: Easing.in(Easing.cubic),
-        useNativeDriver: true,
+        useNativeDriver: Platform.OS !== 'web',
       }),
     ]).start(() => setMounted(false));
   }, [open, overlay, reduceMotion, sheetY]);
@@ -8382,14 +8189,14 @@ function Toast({
         toValue: 1,
         duration: reduceMotion ? 1 : 300,
         easing: Easing.out(Easing.cubic),
-        useNativeDriver: true,
+        useNativeDriver: Platform.OS !== 'web',
       }),
       Animated.delay(2200),
       Animated.timing(progress, {
         toValue: 0,
         duration: reduceMotion ? 1 : 300,
         easing: Easing.in(Easing.cubic),
-        useNativeDriver: true,
+        useNativeDriver: Platform.OS !== 'web',
       }),
     ]).start(onDone);
     return undefined;
@@ -8428,7 +8235,7 @@ function ParticleDot({ particle, onDone }: { particle: BurstParticle; onDone: (i
       toValue: 1,
       duration: particle.duration,
       easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
+      useNativeDriver: Platform.OS !== 'web',
     }).start(() => onDone(particle.id));
   }, [onDone, particle.duration, particle.id, progress]);
 
@@ -8467,7 +8274,7 @@ function SpinIcon({ loading, reduceMotion }: { loading: boolean; reduceMotion: b
         toValue: 1,
         duration: 3500,
         easing: Easing.linear,
-        useNativeDriver: true,
+        useNativeDriver: Platform.OS !== 'web',
       }),
     );
     animation.start();
@@ -8525,63 +8332,6 @@ const styles = StyleSheet.create({
   },
   hidden: {
     display: 'none',
-  },
-  launchSplash: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    top: 0,
-    bottom: 0,
-    zIndex: 100,
-    elevation: 100,
-    backgroundColor: '#0B1330',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  launchSkip: {
-    position: 'absolute',
-    top: 24,
-    right: 20,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-  },
-  launchSkipText: {
-    fontFamily: fontBodyBold,
-    fontSize: 11,
-    color: 'rgba(255,255,255,0.56)',
-  },
-  launchMarkWrap: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  launchCopy: {
-    alignItems: 'center',
-    marginTop: 22,
-  },
-  launchTitle: {
-    fontFamily: fontSerifSemi,
-    fontSize: 30,
-    color: '#F4F8FF',
-  },
-  launchTagline: {
-    fontFamily: fontBodyBold,
-    fontSize: 11,
-    letterSpacing: 1.4,
-    textTransform: 'uppercase',
-    color: '#8FA0C4',
-    marginTop: 8,
-  },
-  launchLoadingRow: {
-    position: 'absolute',
-    bottom: 64,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  launchLoadingText: {
-    fontFamily: fontBodyBold,
-    fontSize: 11,
-    color: '#7C8AA6',
   },
   stage: {
     flex: 1,

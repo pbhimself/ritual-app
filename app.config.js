@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { withAndroidManifest, withDangerousMod } = require('@expo/config-plugins');
+const { withAndroidManifest, withDangerousMod } = require('expo/config-plugins');
 
 const APP_SCHEME = 'com.pratikbhangale.rituals';
 const DEFAULT_SUPABASE_URL = 'https://jzdrckmocagdhmlksnmz.supabase.co';
