@@ -3,6 +3,8 @@ const path = require('path');
 const { withAndroidManifest, withDangerousMod } = require('@expo/config-plugins');
 
 const APP_SCHEME = 'com.bhang.ritual';
+const DEFAULT_SUPABASE_URL = 'https://jzdrckmocagdhmlksnmz.supabase.co';
+const DEFAULT_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_0wzptlM9-QpVGwdJSkPtsQ_HDE0Xr47';
 const NETWORK_SECURITY_CONFIG = `<?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
   <base-config cleartextTrafficPermitted="false">
@@ -72,12 +74,14 @@ module.exports = ({ config }) => {
   const supabaseUrl = readPublicConfig(
     process.env.EXPO_PUBLIC_SUPABASE_URL,
     localEnv.EXPO_PUBLIC_SUPABASE_URL,
+    DEFAULT_SUPABASE_URL,
   );
   const supabaseAnonKey = readPublicConfig(
     process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
     process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY,
     localEnv.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
     localEnv.EXPO_PUBLIC_SUPABASE_ANON_KEY,
+    DEFAULT_SUPABASE_PUBLISHABLE_KEY,
   );
   const plugins = config.plugins ?? [];
   const hasNavigationBarConfig = plugins.some((plugin) => (

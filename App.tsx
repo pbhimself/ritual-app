@@ -491,22 +491,25 @@ const colors = {
 };
 
 const runtimeExtra = (Constants.expoConfig?.extra ?? {}) as Record<string, unknown>;
-const runtimeEnv = (typeof process !== 'undefined' ? process.env : {}) as Record<string, string | undefined>;
+const DEFAULT_SUPABASE_URL = 'https://jzdrckmocagdhmlksnmz.supabase.co';
+const DEFAULT_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_0wzptlM9-QpVGwdJSkPtsQ_HDE0Xr47';
 function readRuntimeString(...values: unknown[]) {
   const value = values.find((candidate): candidate is string => typeof candidate === 'string' && candidate.trim().length > 0);
   return value?.trim();
 }
 const supabaseUrl = readRuntimeString(
-  runtimeEnv.EXPO_PUBLIC_SUPABASE_URL,
-  runtimeEnv.VITE_SUPABASE_URL,
+  process.env.EXPO_PUBLIC_SUPABASE_URL,
+  process.env.VITE_SUPABASE_URL,
   runtimeExtra.supabaseUrl,
+  DEFAULT_SUPABASE_URL,
 );
 const supabaseAnonKey = readRuntimeString(
-  runtimeEnv.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
-  runtimeEnv.EXPO_PUBLIC_SUPABASE_ANON_KEY,
-  runtimeEnv.VITE_SUPABASE_PUBLISHABLE_KEY,
-  runtimeEnv.VITE_SUPABASE_ANON_KEY,
+  process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
+  process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY,
+  process.env.VITE_SUPABASE_PUBLISHABLE_KEY,
+  process.env.VITE_SUPABASE_ANON_KEY,
   runtimeExtra.supabaseAnonKey,
+  DEFAULT_SUPABASE_PUBLISHABLE_KEY,
 );
 const nativeAuthRedirectUrl = `${APP_SCHEME}://${AUTH_CALLBACK_PATH}`;
 const authRedirectUrl = Platform.OS === 'web' && typeof window !== 'undefined' ? window.location.origin : nativeAuthRedirectUrl;
