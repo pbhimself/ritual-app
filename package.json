@@ -52,7 +52,9 @@
     "supabase:link": "supabase link --project-ref jzdrckmocagdhmlksnmz",
     "db:push": "supabase db push",
     "build:android:apk": "eas build -p android --profile preview",
-    "build:android:aab": "eas build -p android --profile production"
+    "build:android:aab": "eas build -p android --profile production",
+    "build:android:alpha": "eas build -p android --profile alpha",
+    "submit:android:alpha": "eas submit -p android --profile alpha"
   },
   "private": true
 }
