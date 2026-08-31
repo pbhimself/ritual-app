@@ -2809,7 +2809,7 @@ function AuthGate({
                           setPendingConfirmationEmail('');
                           clearFeedback();
                         }}
-                        placeholder="pratik28"
+                        placeholder=""
                         textContentType="username"
                         autoComplete="username-new"
                         maxLength={24}
@@ -2827,7 +2827,7 @@ function AuthGate({
                           setFullName(value);
                           clearFeedback();
                         }}
-                        placeholder="Pratik"
+                        placeholder=""
                         textContentType="name"
                         autoComplete="name"
                         returnKeyType="next"
@@ -2843,7 +2843,7 @@ function AuthGate({
                           setPendingConfirmationEmail('');
                           clearFeedback();
                         }}
-                        placeholder="you@rituals.app"
+                        placeholder=""
                         keyboardType="email-address"
                         textContentType="emailAddress"
                         autoComplete="email"
@@ -8598,14 +8598,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 9,
   },
+  // Conditional shadow/elevation on a TextInput ancestor can make Fabric
+  // immediately blur the field. Keep the focused state to stable paint props.
   authInputShellFocused: {
     borderColor: colors.blue1,
     backgroundColor: '#FFFFFF',
-    shadowColor: colors.blue1,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.18,
-    shadowRadius: 4,
-    elevation: 2,
   },
   authInputShellError: {
     borderColor: colors.danger,

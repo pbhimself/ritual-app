@@ -16,7 +16,7 @@
     "android": {
       "package": "com.pratikbhangale.rituals",
       "versionCode": 12,
-      "softwareKeyboardLayoutMode": "pan",
+      "softwareKeyboardLayoutMode": "resize",
       "backgroundColor": "#0A1226",
       "userInterfaceStyle": "light",
       "permissions": [
