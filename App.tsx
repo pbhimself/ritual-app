@@ -25,7 +25,7 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import type { StyleProp, ViewStyle } from 'react-native';
+import type { StyleProp, TextInputProps, ViewStyle } from 'react-native';
 import {
   PanGestureHandler,
   State,
@@ -1550,6 +1550,13 @@ function sanitizeUsername(value: string) {
     .slice(0, 24);
 }
 
+function formatUsernameInput(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, '_')
+    .slice(0, 24);
+}
+
 function isValidUsername(value: string) {
   return /^[a-z0-9_]{3,24}$/.test(value);
 }
@@ -2422,6 +2429,14 @@ function AuthGate({
   const [error, setError] = useState('');
   const [pendingConfirmationEmail, setPendingConfirmationEmail] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const createUsernameRef = useRef<TextInput>(null);
+  const createNameRef = useRef<TextInput>(null);
+  const createEmailRef = useRef<TextInput>(null);
+  const createPasswordRef = useRef<TextInput>(null);
+  const createConfirmPasswordRef = useRef<TextInput>(null);
+  const signInIdentifierRef = useRef<TextInput>(null);
+  const signInPasswordRef = useRef<TextInput>(null);
+  const resetConfirmPasswordRef = useRef<TextInput>(null);
   const cardAnim = useEntranceAnimation(mode, reduceMotion);
   const isTablet = width >= TABLET_MIN_WIDTH;
   const useSplitAuthLayout = width >= WIDE_TABLET_MIN_WIDTH && width > height;
@@ -2785,20 +2800,26 @@ function AuthGate({
                   {isCreate ? (
                     <>
                       <AuthInput
+                        inputRef={createUsernameRef}
                         icon={AtSign}
                         label="Username"
                         value={usernameInput}
                         onChangeText={(value) => {
-                          setUsernameInput(sanitizeUsername(value));
+                          setUsernameInput(formatUsernameInput(value));
                           setPendingConfirmationEmail('');
                           clearFeedback();
                         }}
                         placeholder="pratik28"
+                        textContentType="username"
+                        autoComplete="username-new"
+                        maxLength={24}
                         returnKeyType="next"
+                        onSubmitEditing={() => createNameRef.current?.focus()}
                         error={usernameIsInvalid}
                         helperText={usernameIsInvalid ? 'Use 3-24 letters, numbers, or underscores' : undefined}
                       />
                       <AuthInput
+                        inputRef={createNameRef}
                         icon={User}
                         label="Name"
                         value={fullName}
@@ -2807,9 +2828,13 @@ function AuthGate({
                           clearFeedback();
                         }}
                         placeholder="Pratik"
+                        textContentType="name"
+                        autoComplete="name"
                         returnKeyType="next"
+                        onSubmitEditing={() => createEmailRef.current?.focus()}
                       />
                       <AuthInput
+                        inputRef={createEmailRef}
                         icon={Mail}
                         label="Email"
                         value={email}
@@ -2820,11 +2845,15 @@ function AuthGate({
                         }}
                         placeholder="you@rituals.app"
                         keyboardType="email-address"
+                        textContentType="emailAddress"
+                        autoComplete="email"
                         returnKeyType="next"
+                        onSubmitEditing={() => createPasswordRef.current?.focus()}
                         error={emailIsInvalid}
                         helperText={emailIsInvalid ? 'Enter a valid email address' : undefined}
                       />
                       <AuthInput
+                        inputRef={createPasswordRef}
                         icon={Lock}
                         label="Password"
                         value={password}
@@ -2834,6 +2863,10 @@ function AuthGate({
                         }}
                         placeholder="Create a password"
                         secureTextEntry={!passwordVisible}
+                        textContentType="newPassword"
+                        autoComplete="new-password"
+                        returnKeyType="next"
+                        onSubmitEditing={() => createConfirmPasswordRef.current?.focus()}
                         trailing={(
                           <Pressable accessibilityRole="button" onPress={() => setPasswordVisible((current) => !current)} hitSlop={8}>
                             {passwordVisible ? <EyeOff size={18} color={colors.inkFaint} /> : <Eye size={18} color={colors.inkFaint} />}
@@ -2842,6 +2875,7 @@ function AuthGate({
                       />
                       <PasswordStrengthMeter strength={strength} />
                       <AuthInput
+                        inputRef={createConfirmPasswordRef}
                         icon={Lock}
                         label="Confirm password"
                         value={confirmPassword}
@@ -2851,6 +2885,8 @@ function AuthGate({
                         }}
                         placeholder="Re-enter password"
                         secureTextEntry={!passwordVisible}
+                        textContentType="newPassword"
+                        autoComplete="new-password"
                         returnKeyType="done"
                         onSubmitEditing={submit}
                         error={confirmPasswordMismatch}
@@ -2872,6 +2908,7 @@ function AuthGate({
                       <Text style={styles.authCardTitle}>{isReset ? 'Reset password' : 'Welcome back'}</Text>
                       <Text style={styles.authCardSub}>{isReset ? 'Send a reset link to your Supabase account email' : 'Sign in to keep your streaks flowing'}</Text>
                       <AuthInput
+                        inputRef={signInIdentifierRef}
                         icon={Mail}
                         label="Email or username"
                         value={identifier}
@@ -2881,10 +2918,14 @@ function AuthGate({
                           clearFeedback();
                         }}
                         placeholder="Pratik or pratik@rituals.app"
-                        returnKeyType="next"
+                        textContentType="username"
+                        autoComplete="username"
+                        returnKeyType={isReset && usesSupabaseAuth ? 'done' : 'next'}
+                        onSubmitEditing={isReset && usesSupabaseAuth ? submit : () => signInPasswordRef.current?.focus()}
                       />
                       {isReset && usesSupabaseAuth ? null : (
                         <AuthInput
+                          inputRef={signInPasswordRef}
                           icon={Lock}
                           label={isReset ? 'New password' : 'Password'}
                           value={password}
@@ -2894,8 +2935,10 @@ function AuthGate({
                           }}
                           placeholder={isReset ? 'Minimum 6 characters' : 'Enter your password'}
                           secureTextEntry={!passwordVisible}
+                          textContentType={isReset ? 'newPassword' : 'password'}
+                          autoComplete={isReset ? 'new-password' : 'current-password'}
                           returnKeyType={isReset ? 'next' : 'done'}
-                          onSubmitEditing={isReset ? undefined : submit}
+                          onSubmitEditing={isReset ? () => resetConfirmPasswordRef.current?.focus() : submit}
                           trailing={(
                             <Pressable accessibilityRole="button" onPress={() => setPasswordVisible((current) => !current)} hitSlop={8}>
                               {passwordVisible ? <EyeOff size={18} color={colors.inkFaint} /> : <Eye size={18} color={colors.inkFaint} />}
@@ -2905,6 +2948,7 @@ function AuthGate({
                       )}
                       {isReset && !usesSupabaseAuth ? (
                         <AuthInput
+                          inputRef={resetConfirmPasswordRef}
                           icon={Lock}
                           label="Confirm password"
                           value={confirmPassword}
@@ -2914,6 +2958,8 @@ function AuthGate({
                           }}
                           placeholder="Re-enter password"
                           secureTextEntry={!passwordVisible}
+                          textContentType="newPassword"
+                          autoComplete="new-password"
                           returnKeyType="done"
                           onSubmitEditing={submit}
                         />
@@ -3785,6 +3831,7 @@ function LogoMark({
 }
 
 function AuthInput({
+  inputRef,
   icon: Icon,
   label,
   value,
@@ -3792,27 +3839,35 @@ function AuthInput({
   placeholder,
   secureTextEntry,
   keyboardType,
+  textContentType,
+  autoComplete,
+  importantForAutofill = 'auto',
+  maxLength,
   returnKeyType,
   onSubmitEditing,
   trailing,
   error,
   helperText,
 }: {
+  inputRef?: React.Ref<TextInput>;
   icon: IconComponent;
   label: string;
   value: string;
   onChangeText: (value: string) => void;
   placeholder: string;
   secureTextEntry?: boolean;
-  keyboardType?: 'default' | 'email-address';
-  returnKeyType?: 'done' | 'next';
+  keyboardType?: TextInputProps['keyboardType'];
+  textContentType?: TextInputProps['textContentType'];
+  autoComplete?: TextInputProps['autoComplete'];
+  importantForAutofill?: TextInputProps['importantForAutofill'];
+  maxLength?: number;
+  returnKeyType?: TextInputProps['returnKeyType'];
   onSubmitEditing?: () => void;
   trailing?: ReactNode;
   error?: boolean;
   helperText?: string;
 }) {
   const [focused, setFocused] = useState(false);
-  const inputRef = useRef<TextInput>(null);
   return (
     <View style={styles.authField}>
       <Text style={styles.authFieldLabel}>{label}</Text>
@@ -3828,14 +3883,15 @@ function AuthInput({
           autoCapitalize="none"
           autoCorrect={false}
           keyboardType={keyboardType}
+          textContentType={textContentType}
+          autoComplete={autoComplete}
+          importantForAutofill={importantForAutofill}
+          maxLength={maxLength}
           returnKeyType={returnKeyType}
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
           onSubmitEditing={onSubmitEditing}
-          blurOnSubmit={returnKeyType === 'done'}
-          textContentType={secureTextEntry ? 'password' : keyboardType === 'email-address' ? 'emailAddress' : 'username'}
-          autoComplete={secureTextEntry ? 'password' : keyboardType === 'email-address' ? 'email' : 'username'}
-          importantForAutofill="yes"
+          submitBehavior={returnKeyType === 'done' ? 'blurAndSubmit' : 'submit'}
           style={styles.authInput}
         />
         {trailing}

@@ -3,7 +3,7 @@
     "name": "Rituals Habit",
     "slug": "ritual-app",
     "scheme": "com.pratikbhangale.rituals",
-    "version": "1.0.10",
+    "version": "1.0.11",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -15,7 +15,7 @@
     },
     "android": {
       "package": "com.pratikbhangale.rituals",
-      "versionCode": 11,
+      "versionCode": 12,
       "softwareKeyboardLayoutMode": "pan",
       "backgroundColor": "#0A1226",
       "userInterfaceStyle": "light",
