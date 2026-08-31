@@ -111,7 +111,7 @@ module.exports = ({ config }) => {
           {
             enforceContrast: false,
             hidden: false,
-            style: 'dark',
+            style: 'light',
           },
         ]]),
     ...(hasNotificationsConfig

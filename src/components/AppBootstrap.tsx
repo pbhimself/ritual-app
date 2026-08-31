@@ -30,7 +30,6 @@ export default function AppBootstrap({ children }: { children: ReactNode }) {
   });
   const reduceMotion = useReducedMotion();
   const [fontStartupTimedOut, setFontStartupTimedOut] = useState(false);
-  const [showSplash, setShowSplash] = useState(true);
   const canRenderApp = fontsLoaded || Boolean(fontError);
   const shouldShowStartupFallback = !canRenderApp && fontStartupTimedOut;
 
@@ -46,14 +45,6 @@ export default function AppBootstrap({ children }: { children: ReactNode }) {
     SplashScreen.hideAsync().catch(() => undefined);
     return undefined;
   }, [canRenderApp, shouldShowStartupFallback]);
-
-  useEffect(() => {
-    if (!canRenderApp) {
-      return undefined;
-    }
-    const timer = setTimeout(() => setShowSplash(false), reduceMotion ? 900 : 2800);
-    return () => clearTimeout(timer);
-  }, [canRenderApp, reduceMotion]);
 
   if (!canRenderApp) {
     if (!shouldShowStartupFallback) {
@@ -71,9 +62,8 @@ export default function AppBootstrap({ children }: { children: ReactNode }) {
   return (
     <GestureHandlerRootView style={styles.root}>
       <SafeAreaProvider>
-        <NavigationBar hidden={false} style="dark" />
+        <NavigationBar hidden={false} style="light" />
         {children}
-        {showSplash ? <LaunchSplash reduceMotion={reduceMotion} onSkip={() => setShowSplash(false)} fontsReady={fontsLoaded} /> : null}
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );

@@ -15,7 +15,6 @@ import {
   FlatList,
   KeyboardAvoidingView,
   Linking,
-  LogBox,
   Modal,
   Platform,
   Pressable,
@@ -75,7 +74,6 @@ import {
   Mail,
   MapPin,
   MessageCircle,
-  Moon,
   Pencil,
   PieChart,
   Phone,
@@ -164,7 +162,6 @@ type CheckinCategory = 'aligned_tradeoff' | 'circumstantial' | 'drift' | 'patter
 type FlowSettings = {
   pushNotifications: boolean;
   messageAlerts: boolean;
-  darkTheme: boolean;
   haptics: boolean;
   floTone: FloTone;
 };
@@ -332,7 +329,6 @@ type SupabaseProfile = {
   name: string | null;
   email: string | null;
   avatar_emoji: string | null;
-  dark_theme?: boolean | null;
   haptics_enabled?: boolean | null;
   push_enabled?: boolean | null;
   flo_tone?: FloTone | null;
@@ -363,7 +359,7 @@ const APP_SCHEME = 'com.pratikbhangale.rituals';
 const AUTH_CALLBACK_PATH = 'auth/callback';
 const DEFAULT_COUNTRY_CODE = '+91';
 const DEFAULT_COUNTRY_FLAG = '🇮🇳';
-const PROFILE_SELECT = 'id,username,name,email,avatar_emoji,dark_theme,haptics_enabled,push_enabled,age,city,mobile,country_code,gender,habit_focus,profile_complete,profile_setup_skipped';
+const PROFILE_SELECT = 'id,username,name,email,avatar_emoji,haptics_enabled,push_enabled,age,city,mobile,country_code,gender,habit_focus,profile_complete,profile_setup_skipped';
 const NAV_HEIGHT = 72;
 const NAV_BOTTOM_OFFSET = 0;
 const ASK_FLO_WIDTH = 136;
@@ -557,10 +553,7 @@ function getNotificationsModule() {
 const notificationsModule = getNotificationsModule();
 
 const AUTH_STARTUP_TIMEOUT_MS = 10000;
-
-if (Platform.OS === 'web') {
-  LogBox.ignoreLogs(['"shadow*" style props are deprecated. Use "boxShadow".']);
-}
+const KEYBOARD_AVOIDING_BEHAVIOR = Platform.select({ ios: 'padding' as const, default: undefined });
 
 notificationsModule?.setNotificationHandler({
   handleNotification: async () => ({
@@ -757,7 +750,6 @@ const todayTourSteps: TodayTourStep[] = [
 const seedSettings: FlowSettings = {
   pushNotifications: true,
   messageAlerts: true,
-  darkTheme: false,
   haptics: true,
   floTone: 'gentle',
 };
@@ -1503,9 +1495,18 @@ function normalizeState(parsed: Partial<SavedFlowState> = {}): SavedFlowState {
     graceHearts: nextGraceHearts,
     onboardingDream: isDreamId(parsed.onboardingDream) ? parsed.onboardingDream : null,
     tourCompleted: typeof parsed.tourCompleted === 'boolean' ? parsed.tourCompleted : Boolean(parsed.onboardingDream),
-    settings: { ...seedSettings, ...(parsed.settings ?? {}), floTone: isFloTone(parsed.settings?.floTone) ? parsed.settings.floTone : seedSettings.floTone },
+    settings: normalizeSettings(parsed.settings),
     insight: parsed.insight ?? '',
     stateDate: today,
+  };
+}
+
+function normalizeSettings(settings?: Partial<FlowSettings> | null): FlowSettings {
+  return {
+    pushNotifications: typeof settings?.pushNotifications === 'boolean' ? settings.pushNotifications : seedSettings.pushNotifications,
+    messageAlerts: typeof settings?.messageAlerts === 'boolean' ? settings.messageAlerts : seedSettings.messageAlerts,
+    haptics: typeof settings?.haptics === 'boolean' ? settings.haptics : seedSettings.haptics,
+    floTone: isFloTone(settings?.floTone) ? settings.floTone : seedSettings.floTone,
   };
 }
 
@@ -2014,10 +2015,10 @@ async function loadSupabaseFlowState(userId: string): Promise<Partial<SavedFlowS
 
   const profile = await supabase
     .from('profiles')
-    .select('dark_theme,haptics_enabled,push_enabled,flo_tone')
+    .select('haptics_enabled,push_enabled,flo_tone')
     .eq('id', userId)
     .maybeSingle();
-  const profileData = profile.data as Pick<SupabaseProfile, 'dark_theme' | 'haptics_enabled' | 'push_enabled' | 'flo_tone'> | null;
+  const profileData = profile.data as Pick<SupabaseProfile, 'haptics_enabled' | 'push_enabled' | 'flo_tone'> | null;
   let checkins: RitualCheckin[] = [];
   try {
     const { data } = await supabase
@@ -2049,7 +2050,6 @@ async function loadSupabaseFlowState(userId: string): Promise<Partial<SavedFlowS
     baseDoneFromOtherHabits: 0,
     settings: {
       ...seedSettings,
-      darkTheme: profileData?.dark_theme ?? seedSettings.darkTheme,
       haptics: profileData?.haptics_enabled ?? seedSettings.haptics,
       pushNotifications: profileData?.push_enabled ?? seedSettings.pushNotifications,
       floTone: isFloTone(profileData?.flo_tone) ? profileData.flo_tone : seedSettings.floTone,
@@ -2747,7 +2747,7 @@ function AuthGate({
     <View style={styles.root}>
       <StatusBar style="dark" />
       <LinearGradient colors={['#EEF1F4', colors.page]} style={styles.stage}>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.authKeyboard}>
+        <KeyboardAvoidingView behavior={KEYBOARD_AVOIDING_BEHAVIOR} style={styles.authKeyboard}>
           <ScrollView
             keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator={false}
@@ -3280,7 +3280,7 @@ function ProfileSetupScreen({
       <StatusBar style="dark" />
       <LinearGradient colors={['#EEF1F4', colors.page]} style={styles.stage}>
         <ProfileBubbles reduceMotion={reduceMotion} />
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.authKeyboard}>
+        <KeyboardAvoidingView behavior={KEYBOARD_AVOIDING_BEHAVIOR} style={styles.authKeyboard}>
           <ScrollView
             keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator={false}
@@ -4679,7 +4679,7 @@ function FlowApp({
     impact();
 
     if (supabase && canUseRemote && userId) {
-      const column = key === 'darkTheme' ? 'dark_theme' : key === 'haptics' ? 'haptics_enabled' : key === 'pushNotifications' ? 'push_enabled' : key === 'floTone' ? 'flo_tone' : null;
+      const column = key === 'haptics' ? 'haptics_enabled' : key === 'pushNotifications' ? 'push_enabled' : key === 'floTone' ? 'flo_tone' : null;
       if (column) {
         supabase
           .from('profiles')
@@ -6665,8 +6665,7 @@ function ProfileScreen({
       </View>
 
       <View style={styles.settingsCard}>
-        <Text style={styles.settingsLabel}>Appearance</Text>
-        <ToggleRow icon={Moon} label="Dark theme" value={settings.darkTheme} onChange={(value) => onSettingChange('darkTheme', value)} />
+        <Text style={styles.settingsLabel}>Experience</Text>
         <ToggleRow icon={Zap} label="Haptics" value={settings.haptics} onChange={(value) => onSettingChange('haptics', value)} />
         <ToneRow value={settings.floTone} onChange={(value) => onSettingChange('floTone', value)} />
       </View>
@@ -7559,7 +7558,7 @@ function CoachChatSheet({
     <Modal transparent visible={open} animationType="slide" onRequestClose={onClose}>
       <View style={styles.coachSheetRoot}>
         <Pressable accessibilityRole="button" accessibilityLabel="Close Ask Flo" onPress={onClose} style={styles.coachSheetOverlay} />
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={[styles.coachSheetKeyboard, isTablet && styles.coachSheetKeyboardTablet]}>
+        <KeyboardAvoidingView behavior={KEYBOARD_AVOIDING_BEHAVIOR} style={[styles.coachSheetKeyboard, isTablet && styles.coachSheetKeyboardTablet]}>
           <View
             style={[
               styles.coachSheet,
@@ -7958,7 +7957,7 @@ function AddRitualSheet({
 
   return (
     <Modal visible transparent animationType="none" onRequestClose={() => { if (!saving) onClose(); }}>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={[styles.modalRoot, isTablet && styles.modalRootTablet]}>
+      <KeyboardAvoidingView behavior={KEYBOARD_AVOIDING_BEHAVIOR} style={[styles.modalRoot, isTablet && styles.modalRootTablet]}>
         <Pressable style={StyleSheet.absoluteFill} disabled={saving} onPress={onClose}>
           <Animated.View style={[styles.modalOverlay, { opacity: overlay }]} />
         </Pressable>

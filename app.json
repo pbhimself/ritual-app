@@ -3,16 +3,22 @@
     "name": "Rituals Habit",
     "slug": "ritual-app",
     "scheme": "com.pratikbhangale.rituals",
-    "version": "1.0.9",
+    "version": "1.0.10",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "automatic",
+    "userInterfaceStyle": "light",
+    "backgroundColor": "#0A1226",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "backgroundColor": "#0A1226",
+      "userInterfaceStyle": "light"
     },
     "android": {
       "package": "com.pratikbhangale.rituals",
-      "versionCode": 10,
+      "versionCode": 11,
+      "softwareKeyboardLayoutMode": "pan",
+      "backgroundColor": "#0A1226",
+      "userInterfaceStyle": "light",
       "permissions": [
         "android.permission.POST_NOTIFICATIONS"
       ],
@@ -37,10 +43,6 @@
           "image": "./assets/splash-icon.png",
           "imageWidth": 180,
           "resizeMode": "contain",
-          "dark": {
-            "backgroundColor": "#0A1226",
-            "image": "./assets/splash-icon.png"
-          },
           "android": {
             "backgroundColor": "#0A1226",
             "image": "./assets/splash-icon.png",

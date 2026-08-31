@@ -23,7 +23,6 @@ export type SupabaseProfile = {
   name: string | null;
   email: string | null;
   avatar_emoji?: string | null;
-  dark_theme?: boolean | null;
   haptics_enabled?: boolean | null;
   push_enabled?: boolean | null;
   age?: number | null;
@@ -103,7 +102,7 @@ export async function lookupProfileForUser(supabaseClient: any, user: SupabaseUs
 
   const { data, error } = await supabaseClient
     .from('profiles')
-    .select('id,username,name,email,avatar_emoji,dark_theme,haptics_enabled,push_enabled,age,city,mobile,country_code,gender,habit_focus,profile_complete,profile_setup_skipped')
+    .select('id,username,name,email,avatar_emoji,haptics_enabled,push_enabled,age,city,mobile,country_code,gender,habit_focus,profile_complete,profile_setup_skipped')
     .eq('id', user.id)
     .maybeSingle();
 
@@ -130,7 +129,7 @@ export async function upsertUserProfile(supabaseClient: any, user: SupabaseUser,
       },
       { onConflict: 'id' },
     )
-    .select('id,username,name,email,avatar_emoji,dark_theme,haptics_enabled,push_enabled,age,city,mobile,country_code,gender,habit_focus,profile_complete,profile_setup_skipped')
+    .select('id,username,name,email,avatar_emoji,haptics_enabled,push_enabled,age,city,mobile,country_code,gender,habit_focus,profile_complete,profile_setup_skipped')
     .maybeSingle();
 
   if (error || !data) {
