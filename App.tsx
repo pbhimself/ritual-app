@@ -2993,10 +2993,11 @@ function AuthGate({
                     onPress={submit}
                     style={[styles.authPrimaryButton, submitting && styles.authPrimaryButtonDisabled]}
                   >
+                    {submitting ? <MatrixLoader reduceMotion={reduceMotion} color="#FFFFFF" compact /> : null}
                     <Text style={styles.authPrimaryText}>
                       {submitting ? 'Please wait' : isCreate ? 'Create account' : isReset ? usesSupabaseAuth ? 'Send reset link' : 'Update password' : 'Sign in'}
                     </Text>
-                    <ArrowRight size={16} color="#FFFFFF" strokeWidth={2.7} />
+                    {submitting ? null : <ArrowRight size={16} color="#FFFFFF" strokeWidth={2.7} />}
                   </PressScale>
 
                   {!isReset ? (
@@ -3341,10 +3342,10 @@ function ProfileSetupScreen({
             ]}
           >
             <View style={styles.profileSetupTopBar}>
-              <PressScale reduceMotion={reduceMotion} onPress={onBack} style={styles.profileSetupBackButton}>
+              <PressScale reduceMotion={reduceMotion} disabled={submitting} onPress={onBack} style={styles.profileSetupBackButton}>
                 <ChevronLeft size={18} color={colors.ink} strokeWidth={2.6} />
               </PressScale>
-              <Pressable accessibilityRole="button" onPress={skip} hitSlop={8}>
+              <Pressable accessibilityRole="button" disabled={submitting} onPress={skip} hitSlop={8}>
                 <Text style={styles.profileSetupSkip}>Skip for now</Text>
               </Pressable>
             </View>
@@ -3468,8 +3469,9 @@ function ProfileSetupScreen({
                 onPress={submit}
                 style={[styles.authPrimaryButton, styles.profileContinueButton, formValid && styles.profileContinueButtonReady, (!formValid || submitting) && styles.authPrimaryButtonDisabled]}
               >
+                {submitting ? <MatrixLoader reduceMotion={reduceMotion} color="#FFFFFF" compact /> : null}
                 <Text style={styles.authPrimaryText}>{submitting ? 'Saving' : 'Continue'}</Text>
-                <ArrowRight size={16} color="#FFFFFF" strokeWidth={2.7} />
+                {submitting ? null : <ArrowRight size={16} color="#FFFFFF" strokeWidth={2.7} />}
               </PressScale>
 
               <View style={styles.privacyNote}>
@@ -4791,7 +4793,10 @@ function FlowApp({
       <View style={styles.root}>
         <StatusBar style="dark" />
         <LinearGradient colors={['#EEF1F4', colors.page]} style={styles.stage}>
-          <View style={styles.loadingRoot} />
+          <View style={styles.loadingRoot}>
+            <MatrixLoader reduceMotion={reduceMotion} color={colors.blue1} />
+            <Text style={styles.loadingText}>Loading your rituals...</Text>
+          </View>
         </LinearGradient>
       </View>
     );
@@ -8315,6 +8320,78 @@ function ParticleDot({ particle, onDone }: { particle: BurstParticle; onDone: (i
   );
 }
 
+function MatrixLoader({
+  reduceMotion,
+  color = '#FFFFFF',
+  compact = false,
+}: {
+  reduceMotion: boolean;
+  color?: string;
+  compact?: boolean;
+}) {
+  const bars = useRef([new Animated.Value(0), new Animated.Value(0), new Animated.Value(0)]).current;
+  const travel = compact ? 5 : 9;
+
+  useEffect(() => {
+    bars.forEach((bar) => {
+      bar.stopAnimation();
+      bar.setValue(0);
+    });
+
+    if (reduceMotion) {
+      return undefined;
+    }
+
+    const animations = bars.map((bar, index) => Animated.loop(
+      Animated.sequence([
+        Animated.delay(index * 120),
+        Animated.timing(bar, {
+          toValue: 1,
+          duration: 500,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: Platform.OS !== 'web',
+        }),
+        Animated.timing(bar, {
+          toValue: 0,
+          duration: 500,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: Platform.OS !== 'web',
+        }),
+        Animated.delay((2 - index) * 120),
+      ]),
+    ));
+
+    animations.forEach((animation) => animation.start());
+    return () => animations.forEach((animation) => animation.stop());
+  }, [bars, reduceMotion]);
+
+  return (
+    <View
+      accessibilityRole="progressbar"
+      accessibilityLabel="Loading"
+      style={[styles.matrixLoader, compact && styles.matrixLoaderCompact]}
+    >
+      {bars.map((bar, index) => (
+        <Animated.View
+          key={index}
+          style={[
+            styles.matrixBar,
+            compact && styles.matrixBarCompact,
+            {
+              backgroundColor: color,
+              shadowColor: color,
+              opacity: reduceMotion ? 1 : bar.interpolate({ inputRange: [0, 1], outputRange: [0.55, 1] }),
+              transform: reduceMotion
+                ? undefined
+                : [{ translateY: bar.interpolate({ inputRange: [0, 1], outputRange: [travel, -travel] }) }],
+            },
+          ]}
+        />
+      ))}
+    </View>
+  );
+}
+
 function SpinIcon({ loading, reduceMotion }: { loading: boolean; reduceMotion: boolean }) {
   const spin = useRef(new Animated.Value(0)).current;
 
@@ -8384,6 +8461,41 @@ const styles = StyleSheet.create({
   loadingRoot: {
     flex: 1,
     backgroundColor: colors.page,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 14,
+  },
+  loadingText: {
+    fontFamily: fontBodyBold,
+    fontSize: 12,
+    color: colors.inkSoft,
+  },
+  matrixLoader: {
+    width: 45,
+    height: 40,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  matrixLoaderCompact: {
+    width: 25,
+    height: 22,
+  },
+  matrixBar: {
+    width: 10,
+    height: 22,
+    borderRadius: 5,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.28,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  matrixBarCompact: {
+    width: 5,
+    height: 13,
+    borderRadius: 3,
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
   },
   hidden: {
     display: 'none',
