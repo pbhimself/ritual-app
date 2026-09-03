@@ -245,6 +245,7 @@ type AuthAccount = {
   profileComplete?: boolean;
   profileSetupSkipped?: boolean;
   starterOnboardingPending?: boolean;
+  firstRunTourPending?: boolean;
 };
 
 type ProfileSetupData = {
@@ -353,6 +354,8 @@ const STORAGE_KEY = 'flow-liquid-redesign-v4-clean';
 const AUTH_STORAGE_KEY = 'flow-auth-v1';
 const ASK_FLO_POSITION_STORAGE_KEY = 'ask-flo-launcher-position-v1';
 const HERO_THEME_OVERRIDE_STORAGE_KEY = 'rituals-hero-theme-override-v1';
+const TODAY_TOUR_SEEN_STORAGE_KEY = 'rituals-today-tour-seen-v1';
+const FIRST_RUN_TOUR_PENDING_STORAGE_KEY = 'rituals-first-run-tour-pending-v1';
 const REMINDER_NOTIFICATION_STORAGE_KEY = 'ritual-reminder-notifications-v1';
 const REMINDER_NOTIFICATION_CHANNEL_ID = 'ritual-reminders';
 const APP_SCHEME = 'com.pratikbhangale.rituals';
@@ -365,7 +368,7 @@ const NAV_BOTTOM_OFFSET = 0;
 const ASK_FLO_WIDTH = 136;
 const ASK_FLO_HEIGHT = 48;
 const ASK_FLO_EDGE_PADDING = 16;
-const ASK_FLO_NAV_GAP = 22;
+const ASK_FLO_NAV_GAP = 28;
 const ASK_FLO_TAP_THRESHOLD = 6;
 const TABLET_MIN_WIDTH = 720;
 const WIDE_TABLET_MIN_WIDTH = 900;
@@ -712,6 +715,40 @@ const starterRitualsByDream: Record<DreamId, Array<{ name: string; icon: string;
     { name: 'Wind-down Routine', icon: '🕯️', paletteKey: 'sleep', reminderTime: '20:00' },
   ],
 };
+const extraStarterRitualsByDream: Record<DreamId, Array<{ name: string; icon: string; paletteKey: PaletteKey; goalAmount?: number; goalUnit?: GoalUnit; reminderTime: string }>> = {
+  maintain: [
+    { name: 'Sleep Wind-down', icon: '🌙', paletteKey: 'sleep', goalAmount: 20, goalUnit: 'minutes', reminderTime: '20:00' },
+    { name: 'No Phone Morning', icon: '📵', paletteKey: 'noPhone', goalAmount: 30, goalUnit: 'minutes', reminderTime: '08:00' },
+  ],
+  dedication: [
+    { name: 'Plan Tomorrow', icon: '📝', paletteKey: 'focus', goalAmount: 10, goalUnit: 'minutes', reminderTime: '20:00' },
+    { name: 'Deep Work Start', icon: '💻', paletteKey: 'work', goalAmount: 25, goalUnit: 'minutes', reminderTime: '08:00' },
+  ],
+  calm: [
+    { name: 'Box Breathing', icon: '🧘', paletteKey: 'meditate', goalAmount: 4, goalUnit: 'minutes', reminderTime: '13:00' },
+    { name: 'Screen-Free Bedtime', icon: '📵', paletteKey: 'noPhone', goalAmount: 30, goalUnit: 'minutes', reminderTime: '20:00' },
+  ],
+  strength: [
+    { name: 'Mobility Reset', icon: '🤸', paletteKey: 'gym', goalAmount: 10, goalUnit: 'minutes', reminderTime: '20:00' },
+    { name: 'Sleep Recovery', icon: '🌙', paletteKey: 'sleep', goalAmount: 7, goalUnit: 'hours', reminderTime: '20:00' },
+  ],
+  mind: [
+    { name: 'Idea Capture', icon: '📝', paletteKey: 'creative', goalAmount: 5, goalUnit: 'minutes', reminderTime: '20:00' },
+    { name: 'No-Scroll Focus', icon: '📵', paletteKey: 'noPhone', goalAmount: 30, goalUnit: 'minutes', reminderTime: '08:00' },
+  ],
+  rest: [
+    { name: 'Bedtime Stretch', icon: '🤸', paletteKey: 'sleep', goalAmount: 8, goalUnit: 'minutes', reminderTime: '20:00' },
+    { name: 'Wake Without Phone', icon: '🌅', paletteKey: 'noPhone', goalAmount: 20, goalUnit: 'minutes', reminderTime: '08:00' },
+  ],
+};
+
+function starterOptionsForDream(dream: DreamId) {
+  return [...starterRitualsByDream[dream], ...extraStarterRitualsByDream[dream]];
+}
+
+function dreamTitleForId(dream: DreamId) {
+  return dreamOptions.find((option) => option.id === dream)?.title ?? 'Selected focus';
+}
 const weekLabels = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 const genderOptions = ['Female', 'Male', 'Other'];
 const habitFocusOptions = ['Reading', 'Fitness', 'Mindfulness', 'Sleep', 'Hydration', 'Food'];
@@ -1058,6 +1095,46 @@ async function syncRitualReminderNotifications({
 
   await Promise.all(Object.keys(stored).filter((id) => !next[id]).map((id) => cancelStored(stored[id])));
   await AsyncStorage.setItem(storageKey, JSON.stringify(next));
+}
+
+async function requestRitualNotificationPermission(
+  notifications: {
+    AndroidImportance?: { DEFAULT?: number };
+    setNotificationChannelAsync?: (id: string, channel: Record<string, unknown>) => Promise<unknown>;
+    getPermissionsAsync: () => Promise<{ granted?: boolean; status?: string }>;
+    requestPermissionsAsync: () => Promise<{ granted?: boolean; status?: string }>;
+  } | null,
+) {
+  if (Platform.OS === 'web') {
+    const notificationCtor = getWebNotificationConstructor();
+    if (!notificationCtor) {
+      return false;
+    }
+    if (notificationCtor.permission === 'granted') {
+      return true;
+    }
+    if (notificationCtor.permission === 'denied') {
+      return false;
+    }
+    const permission = await notificationCtor.requestPermission?.().catch(() => 'denied') ?? 'denied';
+    return permission === 'granted';
+  }
+
+  if (!notifications) {
+    return false;
+  }
+  if (Platform.OS === 'android') {
+    await notifications.setNotificationChannelAsync?.(REMINDER_NOTIFICATION_CHANNEL_ID, {
+      name: 'Ritual reminders',
+      importance: notifications.AndroidImportance?.DEFAULT ?? 3,
+    }).catch(() => undefined);
+  }
+  const current = await notifications.getPermissionsAsync().catch(() => ({ granted: false, status: 'denied' }));
+  if (current.granted === true || current.status === 'granted') {
+    return true;
+  }
+  const requested = await notifications.requestPermissionsAsync().catch(() => ({ granted: false, status: 'denied' }));
+  return requested.granted === true || requested.status === 'granted';
 }
 
 function percentFromWeekly(weekly: number[]) {
@@ -1528,6 +1605,7 @@ function normalizeAuth(parsed: Partial<StoredAuth> | null): StoredAuth {
         profileComplete: parsedAccount.profileComplete ?? true,
         profileSetupSkipped: parsedAccount.profileSetupSkipped ?? false,
         starterOnboardingPending: parsedAccount.starterOnboardingPending ?? false,
+        firstRunTourPending: parsedAccount.firstRunTourPending ?? false,
       }
     : DEFAULT_AUTH_ACCOUNT;
   return {
@@ -1744,6 +1822,48 @@ function localAuthAccount(username: string, password: string, email: string, nam
 }
 
 const buildLocalAuthAccount = localAuthAccount;
+
+function normalizedTourEmail(email?: string | null) {
+  return email?.trim().toLowerCase() || '';
+}
+
+function firstRunTourPendingKeys(userId?: string, email?: string | null) {
+  const keys: string[] = [];
+  if (userId) {
+    keys.push(`${FIRST_RUN_TOUR_PENDING_STORAGE_KEY}:user:${userId}`);
+  }
+  const normalizedEmail = normalizedTourEmail(email);
+  if (normalizedEmail) {
+    keys.push(`${FIRST_RUN_TOUR_PENDING_STORAGE_KEY}:email:${normalizedEmail}`);
+  }
+  return keys;
+}
+
+async function setFirstRunTourPending(userId?: string, email?: string | null) {
+  const keys = firstRunTourPendingKeys(userId, email);
+  await Promise.all(keys.map((key) => AsyncStorage.setItem(key, 'true').catch(() => undefined)));
+}
+
+async function clearFirstRunTourPending(userId?: string, email?: string | null) {
+  const keys = firstRunTourPendingKeys(userId, email);
+  await Promise.all(keys.map((key) => AsyncStorage.removeItem(key).catch(() => undefined)));
+}
+
+async function hasFirstRunTourPending(userId?: string, email?: string | null) {
+  const keys = firstRunTourPendingKeys(userId, email);
+  if (!keys.length) {
+    return false;
+  }
+  const values = await Promise.all(keys.map((key) => AsyncStorage.getItem(key).catch(() => null)));
+  return values.some((value) => value === 'true');
+}
+
+async function withFirstRunTourPending(account: AuthAccount): Promise<AuthAccount> {
+  return {
+    ...account,
+    firstRunTourPending: await hasFirstRunTourPending(account.id, account.email),
+  };
+}
 
 async function getProfileForUser(user: SupabaseUser) {
   if (!supabase) {
@@ -2079,6 +2199,7 @@ function AuthenticatedApp() {
   const [account, setAccount] = useState(DEFAULT_AUTH_ACCOUNT);
   const [signedIn, setSignedIn] = useState(false);
   const [profileSetupSource, setProfileSetupSource] = useState<'create' | 'profile' | null>(null);
+  const [flowInitialTab, setFlowInitialTab] = useState<TabKey>('today');
   const [authGateError, setAuthGateError] = useState('');
   const [authGateMessage, setAuthGateMessage] = useState('');
   const reduceMotion = useReducedMotion();
@@ -2122,11 +2243,11 @@ function AuthenticatedApp() {
               releaseStartup();
             }
             getProfileForUser(sessionUser)
-              .then((profile) => {
+              .then(async (profile) => {
                 if (!mounted) {
                   return;
                 }
-                const profiledAccount = buildAuthAccountFromUser(sessionUser, profile);
+                const profiledAccount = await withFirstRunTourPending(buildAuthAccountFromUser(sessionUser, profile));
                 setAccount(profiledAccount);
                 setProfileSetupSource(profileSetupSourceForAccount(profiledAccount));
               })
@@ -2183,11 +2304,11 @@ function AuthenticatedApp() {
         setProfileSetupSource(null);
       }
       getProfileForUser(eventUser)
-        .then((profile) => {
+        .then(async (profile) => {
           if (!mounted) {
             return;
           }
-          const profiledAccount = buildAuthAccountFromUser(eventUser, profile);
+          const profiledAccount = await withFirstRunTourPending(buildAuthAccountFromUser(eventUser, profile));
           setAccount(profiledAccount);
           setProfileSetupSource(profileSetupSourceForAccount(profiledAccount));
         })
@@ -2239,7 +2360,7 @@ function AuthenticatedApp() {
           return;
         }
         const sessionUser = session.user;
-        const nextAccount = provisionalAuthAccountFromUser(sessionUser);
+        const nextAccount = await withFirstRunTourPending(provisionalAuthAccountFromUser(sessionUser));
         if (!mounted) {
           return;
         }
@@ -2251,11 +2372,11 @@ function AuthenticatedApp() {
         setReady(true);
         saveLocalAuth(nextAccount, true);
         getProfileForUser(sessionUser)
-          .then((profile) => {
+          .then(async (profile) => {
             if (!mounted) {
               return;
             }
-            const profiledAccount = buildAuthAccountFromUser(sessionUser, profile);
+            const profiledAccount = await withFirstRunTourPending(buildAuthAccountFromUser(sessionUser, profile));
             setAccount(profiledAccount);
             setProfileSetupSource(profileSetupSourceForAccount(profiledAccount));
             saveLocalAuth(profiledAccount, true);
@@ -2290,9 +2411,12 @@ function AuthenticatedApp() {
     });
     setAccount(nextAccount);
     setSignedIn(true);
-    setProfileSetupSource(null);
-    saveLocalAuth(nextAccount, true);
-  }, [account, saveLocalAuth]);
+      setProfileSetupSource(null);
+      if (profileSetupSource === 'profile') {
+        setFlowInitialTab('profile');
+      }
+      saveLocalAuth(nextAccount, true);
+  }, [account, profileSetupSource, saveLocalAuth]);
 
   const skipProfileSetup = useCallback(async () => {
     const nextAccount = await saveProfileSetupForAccount(account, {
@@ -2302,12 +2426,16 @@ function AuthenticatedApp() {
     setAccount(nextAccount);
     setSignedIn(true);
     setProfileSetupSource(null);
+    if (profileSetupSource === 'profile') {
+      setFlowInitialTab('profile');
+    }
     saveLocalAuth(nextAccount, true);
-  }, [account, saveLocalAuth]);
+  }, [account, profileSetupSource, saveLocalAuth]);
 
   const backFromProfileSetup = useCallback(() => {
     if (profileSetupSource === 'create') {
       setProfileSetupSource(null);
+      setFlowInitialTab('today');
       if (supabase) {
         supabase.auth.signOut().catch(() => undefined);
       }
@@ -2315,6 +2443,7 @@ function AuthenticatedApp() {
       return;
     }
     setProfileSetupSource(null);
+    setFlowInitialTab('profile');
   }, [account, profileSetupSource, saveLocalAuth]);
 
   if (!ready) {
@@ -2376,12 +2505,17 @@ function AuthenticatedApp() {
   return (
     <FlowApp
       userId={account.id}
+      initialTab={flowInitialTab}
       username={account.username}
       email={account.email}
       habitFocus={account.habitFocus}
       profileIncomplete={account.profileComplete === false}
       starterOnboardingPending={account.starterOnboardingPending === true}
-      onOpenProfileSetup={() => setProfileSetupSource('profile')}
+      firstRunTourPending={account.firstRunTourPending === true}
+      onOpenProfileSetup={() => {
+        setFlowInitialTab('profile');
+        setProfileSetupSource('profile');
+      }}
       onLogout={() => {
         if (supabase) {
           supabase.auth.signOut().catch(() => undefined);
@@ -2524,7 +2658,8 @@ function AuthGate({
         }
         setPendingConfirmationEmail('');
         const profile = await getProfileForUser(data.user);
-        onLogin({ ...buildAuthAccountFromUser(data.user, profile), password });
+        const nextAccount = await withFirstRunTourPending({ ...buildAuthAccountFromUser(data.user, profile), password });
+        onLogin(nextAccount);
       } catch (authError) {
         setError(cleanAuthError(
           authError,
@@ -2602,11 +2737,12 @@ function AuthGate({
           return;
         }
 
+        await setFirstRunTourPending(responseUser.id, trimmedEmail);
         let confirmationMessage = 'Account created. Check your email and tap Confirm. The app will open and continue setup.';
         if (responseSession) {
           const profile = await upsertProfileForUser(responseUser, username, trimmedName, trimmedEmail);
           await supabase.auth.signOut().catch(() => undefined);
-          const createdAccount = { ...buildAuthAccountFromUser(responseUser, profile), password };
+          const createdAccount = { ...buildAuthAccountFromUser(responseUser, profile), password, firstRunTourPending: true };
           await AsyncStorage.setItem(
             AUTH_STORAGE_KEY,
             JSON.stringify({ account: createdAccount, signedIn: false }),
@@ -2664,6 +2800,7 @@ function AuthGate({
         ));
         return;
       }
+      await clearFirstRunTourPending(undefined, resendEmail);
       setPendingConfirmationEmail(resendEmail);
       setMessage('Confirmation email sent again. Open the email, confirm, then sign in.');
     } catch (authError) {
@@ -2700,6 +2837,7 @@ function AuthGate({
           ));
           return;
         }
+        await clearFirstRunTourPending(undefined, resetEmail);
         setMode('signIn');
         setIdentifier(resetEmail);
         setMessage('Password reset email sent. Open the link from your inbox.');
@@ -3052,32 +3190,57 @@ function OnboardingDreamFlow({
   const { width } = useWindowDimensions();
   const isTablet = width >= TABLET_MIN_WIDTH;
   const [step, setStep] = useState<OnboardingStep>('dream');
-  const [selectedDream, setSelectedDream] = useState<DreamId | null>(null);
+  const [selectedDreams, setSelectedDreams] = useState<DreamId[]>([]);
   const [enabled, setEnabled] = useState<Record<string, boolean>>({});
   const [submitting, setSubmitting] = useState(false);
-  const selectedOption = dreamOptions.find((option) => option.id === selectedDream) ?? null;
-  const starters = selectedDream ? starterRitualsByDream[selectedDream] : [];
-  const selectedStarters = starters.filter((starter) => enabled[starter.name] !== false);
+  const starters = selectedDreams.flatMap((dream) =>
+    starterOptionsForDream(dream).map((starter) => ({
+      ...starter,
+      dream,
+      starterKey: `${dream}:${starter.name}`,
+    })),
+  );
+  const selectedStarters = starters.filter((starter) => enabled[starter.starterKey] === true).slice(0, 5);
   const stepIndex = step === 'dream' ? 0 : 1;
   const title = step === 'dream'
     ? "What's your ritual dream?"
-    : `Starter rituals for "${selectedOption?.title ?? 'your dream'}"`;
+    : 'Starter rituals for your focus';
   const subtitle = step === 'dream'
-    ? "Pick a direction or skip. You can change everything later."
-    : 'These become your real starting rituals. Keep what fits.';
+    ? "Pick one or more directions. You can change everything later."
+    : 'Choose up to 5 starters. These become your first rituals.';
+  const selectedDreamLabel = selectedDreams.length === 1
+    ? '1 focus selected'
+    : `${selectedDreams.length} focuses selected`;
   const contentMaxWidth = isTablet
     ? responsiveMaxWidth(width, PROFILE_SETUP_MAX_WIDTH, 28)
     : undefined;
 
   useEffect(() => {
-    if (!selectedDream) {
+    if (!selectedDreams.length) {
+      setEnabled({});
       return;
     }
-    setEnabled(Object.fromEntries(starterRitualsByDream[selectedDream].map((starter) => [starter.name, true])));
-  }, [selectedDream]);
+    const nextEnabled: Record<string, boolean> = {};
+    let enabledCount = 0;
+    const maxOptions = Math.max(...selectedDreams.map((dream) => starterOptionsForDream(dream).length));
+    for (let optionIndex = 0; optionIndex < maxOptions && enabledCount < 5; optionIndex += 1) {
+      selectedDreams.forEach((dream) => {
+        if (enabledCount >= 5) {
+          return;
+        }
+        const starter = starterOptionsForDream(dream)[optionIndex];
+        if (!starter) {
+          return;
+        }
+        nextEnabled[`${dream}:${starter.name}`] = true;
+        enabledCount += 1;
+      });
+    }
+    setEnabled(nextEnabled);
+  }, [selectedDreams]);
 
   const continueToStarters = () => {
-    if (selectedDream) {
+    if (selectedDreams.length) {
       setStep('starters');
     }
   };
@@ -3089,15 +3252,35 @@ function OnboardingDreamFlow({
   };
 
   const submitStarters = async () => {
-    if (!selectedDream || !selectedStarters.length || submitting) {
+    if (!selectedDreams.length || !selectedStarters.length || submitting) {
       return;
     }
     try {
       setSubmitting(true);
-      await onComplete(selectedDream, selectedStarters);
+      await onComplete(selectedDreams[0], selectedStarters);
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const toggleDream = (dream: DreamId) => {
+    setSelectedDreams((current) =>
+      current.includes(dream)
+        ? current.filter((item) => item !== dream)
+        : [...current, dream],
+    );
+  };
+
+  const toggleStarter = (starterKey: string, checked: boolean) => {
+    setEnabled((current) => {
+      if (!checked) {
+        const activeCount = starters.filter((starter) => current[starter.starterKey] === true).length;
+        if (activeCount >= 5) {
+          return current;
+        }
+      }
+      return { ...current, [starterKey]: !checked };
+    });
   };
 
   return (
@@ -3140,15 +3323,28 @@ function OnboardingDreamFlow({
 
           {step === 'dream' ? (
             <>
+              {selectedDreams.length ? (
+                <View style={styles.onboardingSelectionSummary}>
+                  {selectedDreams.map((dream) => {
+                    const option = dreamOptions.find((item) => item.id === dream) ?? dreamOptions[0];
+                    return (
+                      <View key={dream} style={styles.onboardingSelectionChip}>
+                        <Text numberOfLines={1} style={styles.onboardingSelectionText}>{option.title}</Text>
+                      </View>
+                    );
+                  })}
+                </View>
+              ) : null}
+
               <View style={styles.dreamGrid}>
                 {dreamOptions.map((option) => {
-                  const selected = selectedDream === option.id;
+                  const selected = selectedDreams.includes(option.id);
                   const palette = habitPalette[option.paletteKey];
                   return (
                     <PressScale
                       key={option.id}
                       reduceMotion={reduceMotion}
-                      onPress={() => setSelectedDream(option.id)}
+                      onPress={() => toggleDream(option.id)}
                       style={[
                         styles.dreamCard,
                         selected && {
@@ -3178,31 +3374,47 @@ function OnboardingDreamFlow({
 
               <View style={styles.onboardingNote}>
                 <Sparkles size={16} color={colors.blue1} strokeWidth={2.4} />
-                <Text style={styles.onboardingNoteText}>Your choice drives starter suggestions now and helps the coach prioritize future insights.</Text>
+                <Text style={styles.onboardingNoteText}>
+                  {selectedDreams.length ? `${selectedDreamLabel}. ` : ''}
+                  Your choices combine starter suggestions and help the coach prioritize future insights.
+                </Text>
               </View>
 
               <PressScale
                 reduceMotion={reduceMotion}
-                disabled={!selectedDream}
+                disabled={!selectedDreams.length}
                 onPress={continueToStarters}
-                style={[styles.authPrimaryButton, !selectedDream && styles.authPrimaryButtonDisabled]}
+                style={[styles.authPrimaryButton, !selectedDreams.length && styles.authPrimaryButtonDisabled]}
               >
-                <Text style={styles.authPrimaryText}>Continue</Text>
+                <Text style={styles.authPrimaryText}>{selectedDreams.length ? `Continue with ${selectedDreams.length}` : 'Continue'}</Text>
                 <ArrowRight size={16} color="#FFFFFF" strokeWidth={2.7} />
               </PressScale>
             </>
           ) : (
             <>
+              <View style={styles.onboardingSelectionSummary}>
+                {selectedDreams.map((dream) => (
+                  <View key={dream} style={styles.onboardingSelectionChip}>
+                    <Text numberOfLines={1} style={styles.onboardingSelectionText}>{dreamTitleForId(dream)}</Text>
+                  </View>
+                ))}
+              </View>
+
               <View style={styles.starterList}>
                 {starters.map((starter) => {
-                  const checked = enabled[starter.name] !== false;
+                  const checked = enabled[starter.starterKey] === true;
                   const palette = habitPalette[starter.paletteKey];
+                  const detail = [
+                    dreamTitleForId(starter.dream),
+                    goalLabel(starter.goalAmount, starter.goalUnit),
+                    formatReminderTime(starter.reminderTime),
+                  ].filter(Boolean).join(' · ');
                   return (
                     <Pressable
-                      key={starter.name}
+                      key={starter.starterKey}
                       accessibilityRole="switch"
                       accessibilityState={{ checked }}
-                      onPress={() => setEnabled((current) => ({ ...current, [starter.name]: !checked }))}
+                      onPress={() => toggleStarter(starter.starterKey, checked)}
                       style={styles.starterRow}
                     >
                       <View style={[styles.starterIcon, { backgroundColor: palette.bg[0] }]}>
@@ -3210,9 +3422,7 @@ function OnboardingDreamFlow({
                       </View>
                       <View style={styles.starterCopy}>
                         <Text style={styles.starterName}>{starter.name}</Text>
-                        <Text style={styles.starterMeta}>
-                          {[goalLabel(starter.goalAmount, starter.goalUnit), formatReminderTime(starter.reminderTime)].filter(Boolean).join(' · ')}
-                        </Text>
+                        <Text style={styles.starterMeta}>{detail}</Text>
                       </View>
                       <View style={[styles.amountSwitch, checked && styles.amountSwitchOn]}>
                         <View style={[styles.amountSwitchKnob, checked && styles.amountSwitchKnobOn]} />
@@ -3228,11 +3438,11 @@ function OnboardingDreamFlow({
                 </Pressable>
                 <Pressable
                   accessibilityRole="button"
-                  disabled={!selectedDream || !selectedStarters.length || submitting}
+                  disabled={!selectedDreams.length || !selectedStarters.length || submitting}
                   onPress={submitStarters}
-                  style={[styles.btnPrimary, (!selectedDream || !selectedStarters.length || submitting) && styles.btnPrimaryDisabled]}
+                  style={[styles.btnPrimary, (!selectedDreams.length || !selectedStarters.length || submitting) && styles.btnPrimaryDisabled]}
                 >
-                  <Text style={styles.btnPrimaryText}>{submitting ? 'Saving' : 'Start my rituals'}</Text>
+                  <Text style={styles.btnPrimaryText}>{submitting ? 'Saving' : `Start ${selectedStarters.length} rituals`}</Text>
                 </Pressable>
               </View>
             </>
@@ -4079,27 +4289,31 @@ function PressScale({
 
 function FlowApp({
   userId,
+  initialTab = 'today',
   username,
   email,
   habitFocus,
   profileIncomplete,
   starterOnboardingPending,
+  firstRunTourPending,
   onOpenProfileSetup,
   onLogout,
 }: {
   userId?: string;
+  initialTab?: TabKey;
   username: string;
   email?: string;
   habitFocus?: string;
   profileIncomplete: boolean;
   starterOnboardingPending: boolean;
+  firstRunTourPending: boolean;
   onOpenProfileSetup: () => void;
   onLogout: () => void;
 }) {
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
   const reduceMotion = useReducedMotion();
-  const [activeTab, setActiveTab] = useState<TabKey>('today');
+  const [activeTab, setActiveTab] = useState<TabKey>(initialTab);
   const [rituals, setRituals] = useState(defaultState.rituals);
   const [checkins, setCheckins] = useState(defaultState.checkins);
   const [totalActiveRituals, setTotalActiveRituals] = useState(defaultState.totalActiveRituals);
@@ -4121,22 +4335,28 @@ function FlowApp({
   const [particles, setParticles] = useState<BurstParticle[]>([]);
   const [newRitualId, setNewRitualId] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
-  const [starterOnboardingAllowed, setStarterOnboardingAllowed] = useState(starterOnboardingPending);
+  const [tabLoading, setTabLoading] = useState(false);
+  const tabLoadingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [starterOnboardingAllowed, setStarterOnboardingAllowed] = useState(starterOnboardingPending && firstRunTourPending);
+  const [todayTourSeen, setTodayTourSeen] = useState(!firstRunTourPending);
   const isTablet = width >= TABLET_MIN_WIDTH;
   const appHorizontalPadding = isTablet ? 28 : 20;
   const storageKey = useMemo(() => (userId ? `${STORAGE_KEY}:${userId}` : STORAGE_KEY), [userId]);
+  const todayTourSeenStorageKey = useMemo(() => `${TODAY_TOUR_SEEN_STORAGE_KEY}:${userId ?? 'local'}`, [userId]);
   const reminderStorageKey = useMemo(() => `${REMINDER_NOTIFICATION_STORAGE_KEY}:${userId ?? 'local'}`, [userId]);
   const canUseRemote = Boolean(supabase && userId && !userId.startsWith('local-'));
 
   useEffect(() => {
-    setStarterOnboardingAllowed(starterOnboardingPending);
-  }, [starterOnboardingPending, userId]);
+    setStarterOnboardingAllowed(starterOnboardingPending && firstRunTourPending);
+    setTodayTourSeen(!firstRunTourPending);
+  }, [firstRunTourPending, starterOnboardingPending, userId]);
 
   useEffect(() => {
     let mounted = true;
     setHydrated(false);
 
-    const applyState = (state: SavedFlowState) => {
+    const applyState = (state: SavedFlowState, tourAlreadySeen: boolean) => {
+      const hasCompletedTour = tourAlreadySeen || Boolean(state.tourCompleted);
       setRituals(state.rituals);
       setCheckins(state.checkins);
       setTotalActiveRituals(state.totalActiveRituals);
@@ -4145,7 +4365,8 @@ function FlowApp({
       setRhythmPoints(state.rhythmPoints);
       setGraceHearts(state.graceHearts);
       setOnboardingDream(state.onboardingDream ?? null);
-      setTourCompleted(Boolean(state.tourCompleted));
+      setTourCompleted(hasCompletedTour);
+      setTodayTourSeen(hasCompletedTour || !firstRunTourPending);
       setTourStepIndex(0);
       setSettings(state.settings);
       setInsight(state.insight);
@@ -4168,6 +4389,8 @@ function FlowApp({
 
     const hydrate = async () => {
       const local = await loadLocal();
+      const storedTourSeen = await AsyncStorage.getItem(todayTourSeenStorageKey).catch(() => null);
+      const tourAlreadySeen = storedTourSeen === 'true';
       if (supabase && canUseRemote && userId) {
         try {
           const remote = await loadSupabaseFlowState(userId);
@@ -4175,22 +4398,28 @@ function FlowApp({
             const remoteState = normalizeState({ ...defaultState, ...remote });
             const state = remoteState.rituals.length || !local.rituals.length ? remoteState : local;
             if (mounted) {
-              applyState(state);
+              applyState(state, tourAlreadySeen);
             }
             await AsyncStorage.setItem(storageKey, JSON.stringify(state));
+            if (tourAlreadySeen || state.tourCompleted) {
+              await AsyncStorage.setItem(todayTourSeenStorageKey, 'true').catch(() => undefined);
+            }
             return;
           }
         } catch {
           const local = await loadLocal();
           if (mounted) {
-            applyState(local);
+            applyState(local, tourAlreadySeen);
           }
           return;
         }
       }
 
       if (mounted) {
-        applyState(local);
+        applyState(local, tourAlreadySeen);
+      }
+      if (tourAlreadySeen || local.tourCompleted) {
+        await AsyncStorage.setItem(todayTourSeenStorageKey, 'true').catch(() => undefined);
       }
     };
 
@@ -4204,8 +4433,11 @@ function FlowApp({
 
     return () => {
       mounted = false;
+      if (tabLoadingTimer.current) {
+        clearTimeout(tabLoadingTimer.current);
+      }
     };
-  }, [canUseRemote, storageKey, userId]);
+  }, [canUseRemote, firstRunTourPending, storageKey, todayTourSeenStorageKey, userId]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -4481,8 +4713,11 @@ function FlowApp({
 
   const finishTodayTour = useCallback(() => {
     setTourCompleted(true);
+    setTodayTourSeen(true);
+    AsyncStorage.setItem(todayTourSeenStorageKey, 'true').catch(() => undefined);
+    clearFirstRunTourPending(userId, email).catch(() => undefined);
     setTourStepIndex(0);
-  }, []);
+  }, [email, todayTourSeenStorageKey, userId]);
 
   const nextTodayTourStep = useCallback(() => {
     if (tourStepIndex >= todayTourSteps.length - 1) {
@@ -4731,25 +4966,52 @@ function FlowApp({
     impact();
   };
 
-  const updateSetting = <K extends keyof FlowSettings>(key: K, value: FlowSettings[K]) => {
+  const persistRemoteSetting = <K extends keyof FlowSettings>(key: K, value: FlowSettings[K]) => {
+    if (!supabase || !canUseRemote || !userId) {
+      return;
+    }
+    const column = key === 'haptics' ? 'haptics_enabled' : key === 'pushNotifications' ? 'push_enabled' : key === 'floTone' ? 'flo_tone' : null;
+    if (!column) {
+      return;
+    }
+    supabase
+      .from('profiles')
+      .update({ [column]: value })
+      .eq('id', userId)
+      .then(({ error: writeError }) => {
+        if (writeError) {
+          showToast(`Database save failed: ${writeError.message}`);
+        }
+      });
+  };
+
+  const applySetting = <K extends keyof FlowSettings>(key: K, value: FlowSettings[K]) => {
     setSettings((current) => ({ ...current, [key]: value }));
     showToast(key === 'floTone' ? `Flo style: ${String(value)}` : value ? 'Setting enabled' : 'Setting disabled');
     impact();
+    persistRemoteSetting(key, value);
+  };
 
-    if (supabase && canUseRemote && userId) {
-      const column = key === 'haptics' ? 'haptics_enabled' : key === 'pushNotifications' ? 'push_enabled' : key === 'floTone' ? 'flo_tone' : null;
-      if (column) {
-        supabase
-          .from('profiles')
-          .update({ [column]: value })
-          .eq('id', userId)
-          .then(({ error: writeError }) => {
-            if (writeError) {
-              showToast(`Database save failed: ${writeError.message}`);
-            }
-          });
-      }
+  const updateSetting = <K extends keyof FlowSettings>(key: K, value: FlowSettings[K]) => {
+    if (key === 'pushNotifications' && value === true) {
+      requestRitualNotificationPermission(notificationsModule as never)
+        .then((granted) => {
+          if (!granted) {
+            setSettings((current) => ({ ...current, pushNotifications: false }));
+            persistRemoteSetting('pushNotifications', false);
+            showToast('Notification permission not granted');
+            return;
+          }
+          applySetting(key, value);
+        })
+        .catch(() => {
+          setSettings((current) => ({ ...current, pushNotifications: false }));
+          persistRemoteSetting('pushNotifications', false);
+          showToast('Notification permission not granted');
+        });
+      return;
     }
+    applySetting(key, value);
   };
 
   const logout = useCallback(() => {
@@ -4761,6 +5023,21 @@ function FlowApp({
     }).catch(() => undefined);
     onLogout();
   }, [onLogout, reminderStorageKey, rituals]);
+
+  const changeTab = useCallback((nextTab: TabKey) => {
+    if (nextTab === activeTab) {
+      return;
+    }
+    if (tabLoadingTimer.current) {
+      clearTimeout(tabLoadingTimer.current);
+    }
+    setTabLoading(true);
+    setActiveTab(nextTab);
+    tabLoadingTimer.current = setTimeout(() => {
+      setTabLoading(false);
+      tabLoadingTimer.current = null;
+    }, reduceMotion ? 40 : 140);
+  }, [activeTab, reduceMotion]);
 
   const generateInsight = (coachText?: string) => {
     if (!rituals.length) {
@@ -4783,10 +5060,20 @@ function FlowApp({
     : undefined;
   const showTodayTour = hydrated
     && activeTab === 'today'
+    && firstRunTourPending
+    && !todayTourSeen
     && !tourCompleted
     && !addOpen
     && !editingRitual
     && !coachOpen;
+
+  useEffect(() => {
+    if (!showTodayTour) {
+      return;
+    }
+    AsyncStorage.setItem(todayTourSeenStorageKey, 'true').catch(() => undefined);
+    clearFirstRunTourPending(userId, email).catch(() => undefined);
+  }, [email, showTodayTour, todayTourSeenStorageKey, userId]);
 
   if (!hydrated) {
     return (
@@ -4817,7 +5104,6 @@ function FlowApp({
       <StatusBar style="dark" />
       <LinearGradient colors={['#EEF1F4', colors.page]} style={styles.stage}>
         <Animated.View
-          key={activeTab}
           style={[
             styles.screenHost,
             {
@@ -4828,7 +5114,7 @@ function FlowApp({
             screenStyle,
           ]}
         >
-          {activeTab === 'today' ? (
+          {activeTab === 'today' && !showTodayTour ? (
             <TodayScreen
               username={username}
               rituals={rituals}
@@ -4878,7 +5164,15 @@ function FlowApp({
           ) : null}
         </Animated.View>
 
-        <BottomNav activeTab={activeTab} bottomInset={insets.bottom} onChange={setActiveTab} onAdd={() => setAddOpen(true)} />
+        {tabLoading ? (
+          <View pointerEvents="none" style={styles.tabLoadingOverlay}>
+            <View style={styles.tabLoadingPill}>
+              <MatrixLoader reduceMotion={reduceMotion} color={colors.blue1} compact />
+            </View>
+          </View>
+        ) : null}
+
+        <BottomNav activeTab={activeTab} bottomInset={insets.bottom} onChange={changeTab} onAdd={() => setAddOpen(true)} />
         <AskFloLauncher userId={userId} bottomInset={insets.bottom} topInset={insets.top} reduceMotion={reduceMotion} onOpen={() => setCoachOpen(true)} />
         <CoachChatSheet
           open={coachOpen}
@@ -4915,7 +5209,6 @@ function FlowApp({
           totalSteps={todayTourSteps.length}
           topInset={insets.top}
           bottomInset={insets.bottom}
-          contentMaxWidth={contentMaxWidth}
           onNext={nextTodayTourStep}
           onSkip={finishTodayTour}
         />
@@ -4972,6 +5265,7 @@ function TodayScreen({
   const statusRows = useMemo(
     () =>
       rituals.map((ritual) => ({
+        id: ritual.id,
         icon: ritual.icon,
         name: ritual.name,
         streakDays: ritual.streakDays,
@@ -5106,7 +5400,7 @@ function TodayScreen({
           <View style={styles.statusCard}>
             {statusRows.map((row) => (
               <StatusRow
-                key={row.name}
+                key={row.id}
                 icon={row.icon}
                 name={row.name}
                 streakDays={row.streakDays}
@@ -6665,18 +6959,88 @@ function ProfileScreen({
 }) {
   const best = rituals.reduce((max, ritual) => Math.max(max, ritual.bestStreakDays, ritual.streakDays), 0);
   const daysActive = rituals.reduce((sum, ritual) => sum + ritual.heat.filter(Boolean).length, 0);
-  const now = useMinuteNow();
-  const todayLabel = useMemo(() => formatTodayLabel(now), [now]);
+  const joinedDate = useMemo(() => {
+    const oldestCreatedAt = rituals.reduce<number | null>((oldest, ritual) => {
+      if (!Number.isFinite(ritual.createdAt)) {
+        return oldest;
+      }
+      return oldest === null ? ritual.createdAt : Math.min(oldest, ritual.createdAt);
+    }, null);
+    return oldestCreatedAt ? new Date(oldestCreatedAt) : new Date();
+  }, [rituals]);
+  const joinedLabel = useMemo(() => formatTodayLabel(joinedDate), [joinedDate]);
   const [activePolicy, setActivePolicy] = useState<PolicyKey | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const openSupport = (subject: string) => {
     const mailto = `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent(subject)}`;
     Linking.openURL(mailto).catch(() => undefined);
   };
 
+  if (settingsOpen) {
+    return (
+      <>
+        <ScrollView contentContainerStyle={styles.screenScroll} showsVerticalScrollIndicator={false}>
+          <View style={styles.settingsPageHeader}>
+            <Pressable accessibilityRole="button" accessibilityLabel="Back to profile" onPress={() => setSettingsOpen(false)} style={styles.settingsBackButton}>
+              <ChevronLeft size={20} color={colors.ink} strokeWidth={2.5} />
+            </Pressable>
+            <View style={styles.screenHeaderCopy}>
+              <Text style={styles.screenTitle}>Settings</Text>
+              <Text numberOfLines={1} style={styles.screenHeaderSub}>App settings & preferences</Text>
+            </View>
+          </View>
+
+          <View style={styles.settingsCard}>
+            <Text style={styles.settingsLabel}>Notifications</Text>
+            <ToggleRow icon={Bell} label="Push notifications" value={settings.pushNotifications} onChange={(value) => onSettingChange('pushNotifications', value)} />
+            <InfoRow icon={Clock3} label="Daily reminder time" value="Editable per ritual" />
+            <ToggleRow icon={MessageCircle} label="Message alerts" value={settings.messageAlerts} onChange={(value) => onSettingChange('messageAlerts', value)} />
+          </View>
+
+          <View style={styles.settingsCard}>
+            <Text style={styles.settingsLabel}>Experience</Text>
+            <ToggleRow icon={Zap} label="Haptics" value={settings.haptics} onChange={(value) => onSettingChange('haptics', value)} />
+            <ToneRow value={settings.floTone} onChange={(value) => onSettingChange('floTone', value)} />
+          </View>
+
+          <View style={styles.settingsCard}>
+            <Text style={styles.settingsLabel}>Legal & trust</Text>
+            <ActionRow icon={ShieldCheck} label="Privacy Policy" onPress={() => setActivePolicy('privacy')} />
+            <ActionRow icon={Check} label="Terms of Service" onPress={() => setActivePolicy('terms')} />
+            <ActionRow icon={Lock} label="Security Policy" onPress={() => setActivePolicy('security')} />
+            <ActionRow icon={User} label="Accessibility Statement" onPress={() => setActivePolicy('accessibility')} />
+          </View>
+
+          <View style={styles.settingsCard}>
+            <Text style={styles.settingsLabel}>Support</Text>
+            <ActionRow icon={MessageCircle} label="Support" value={SUPPORT_EMAIL} onPress={() => openSupport('Rituals support request')} />
+            <ActionRow icon={Pencil} label="Report bug" value="Send details" onPress={() => openSupport('Rituals bug report')} />
+          </View>
+
+          <View style={styles.settingsCard}>
+            <Text style={styles.settingsLabel}>Account</Text>
+            <Pressable accessibilityRole="button" onPress={onLogout} style={styles.settingRow}>
+              <View style={styles.settingIcon}>
+                <LogOut size={17} color={colors.danger} strokeWidth={2.3} />
+              </View>
+              <Text style={[styles.settingName, { color: colors.danger }]}>Sign out</Text>
+            </Pressable>
+          </View>
+        </ScrollView>
+        <PolicyModal policy={activePolicy} onClose={() => setActivePolicy(null)} />
+      </>
+    );
+  }
+
   return (
     <>
       <ScrollView contentContainerStyle={styles.screenScroll} showsVerticalScrollIndicator={false}>
-        <ScreenHeader title="Profile" icon={Settings} />
+        <ScreenHeader
+          title="Profile"
+          icon={Settings}
+          onIconPress={() => setSettingsOpen(true)}
+          iconAccessibilityLabel="Open settings"
+        />
         <View style={styles.profileCard}>
         <View style={styles.profileAvatar}>
           <LogoMark size={52} reduceMotion={reduceMotion} style={styles.logoMarkInline} />
@@ -6688,11 +7052,11 @@ function ProfileScreen({
               <Text style={styles.premiumText}>Today</Text>
             </LinearGradient>
             <Pressable accessibilityRole="button" accessibilityLabel="Edit profile details" onPress={onOpenProfileSetup} hitSlop={8} style={styles.profileEditButton}>
-              <Settings size={13} color={colors.blue1} strokeWidth={2.4} />
+              <Pencil size={13} color={colors.blue1} strokeWidth={2.4} />
             </Pressable>
           </View>
           {email ? <Text numberOfLines={1} style={styles.profileEmail}>{email}</Text> : null}
-          <Text numberOfLines={1} style={styles.profileStarted}>Started {todayLabel}</Text>
+          <Text numberOfLines={1} style={styles.profileStarted}>Joined {joinedLabel}</Text>
           {habitFocus ? <Text numberOfLines={1} style={styles.profileFocus}>Focus: {habitFocus}</Text> : null}
         </View>
         </View>
@@ -6718,41 +7082,10 @@ function ProfileScreen({
         </LinearGradient>
       ) : null}
 
-      <View style={styles.settingsCard}>
-        <Text style={styles.settingsLabel}>Notifications</Text>
-        <ToggleRow icon={Bell} label="Push notifications" value={settings.pushNotifications} onChange={(value) => onSettingChange('pushNotifications', value)} />
-        <InfoRow icon={Clock3} label="Daily reminder time" value="Editable per ritual" />
-        <ToggleRow icon={MessageCircle} label="Message alerts" value={settings.messageAlerts} onChange={(value) => onSettingChange('messageAlerts', value)} />
-      </View>
-
-      <View style={styles.settingsCard}>
-        <Text style={styles.settingsLabel}>Experience</Text>
-        <ToggleRow icon={Zap} label="Haptics" value={settings.haptics} onChange={(value) => onSettingChange('haptics', value)} />
-        <ToneRow value={settings.floTone} onChange={(value) => onSettingChange('floTone', value)} />
-      </View>
-
         <View style={styles.settingsCard}>
-          <Text style={styles.settingsLabel}>Legal & trust</Text>
-          <ActionRow icon={ShieldCheck} label="Privacy Policy" onPress={() => setActivePolicy('privacy')} />
-          <ActionRow icon={Check} label="Terms of Service" onPress={() => setActivePolicy('terms')} />
-          <ActionRow icon={Lock} label="Security Policy" onPress={() => setActivePolicy('security')} />
-          <ActionRow icon={User} label="Accessibility Statement" onPress={() => setActivePolicy('accessibility')} />
-        </View>
-
-        <View style={styles.settingsCard}>
-          <Text style={styles.settingsLabel}>Support</Text>
-          <ActionRow icon={MessageCircle} label="Contact support" value={SUPPORT_EMAIL} onPress={() => openSupport('Rituals support request')} />
-          <ActionRow icon={Pencil} label="Report a bug" value="Send details" onPress={() => openSupport('Rituals bug report')} />
-        </View>
-
-        <View style={styles.settingsCard}>
-          <Text style={styles.settingsLabel}>Account</Text>
-          <Pressable accessibilityRole="button" onPress={onLogout} style={styles.settingRow}>
-            <View style={styles.settingIcon}>
-              <LogOut size={17} color={colors.danger} strokeWidth={2.3} />
-            </View>
-            <Text style={[styles.settingName, { color: colors.danger }]}>Sign out</Text>
-          </Pressable>
+          <Text style={styles.settingsLabel}>Personal details</Text>
+          <ActionRow icon={Pencil} label="Edit profile" value="Personal details" onPress={onOpenProfileSetup} />
+          <ActionRow icon={Settings} label="Settings" value="App settings & preferences" onPress={() => setSettingsOpen(true)} />
         </View>
       </ScrollView>
       <PolicyModal policy={activePolicy} onClose={() => setActivePolicy(null)} />
@@ -6957,9 +7290,20 @@ function GradientCard({ children, style }: { children: ReactNode; style?: object
   );
 }
 
-function ScreenHeader({ title, icon: Icon }: { title: string; icon: IconComponent }) {
+function ScreenHeader({
+  title,
+  icon: Icon,
+  onIconPress,
+  iconAccessibilityLabel,
+}: {
+  title: string;
+  icon: IconComponent;
+  onIconPress?: () => void;
+  iconAccessibilityLabel?: string;
+}) {
   const now = useMinuteNow();
   const todayLabel = useMemo(() => formatLiveDateTime(now), [now]);
+  const IconWrap = onIconPress ? Pressable : View;
 
   return (
     <View style={styles.topRow}>
@@ -6967,9 +7311,14 @@ function ScreenHeader({ title, icon: Icon }: { title: string; icon: IconComponen
         <Text style={styles.screenTitle}>{title}</Text>
         <Text numberOfLines={1} style={styles.screenHeaderSub}>{todayLabel}</Text>
       </View>
-      <View style={styles.bellButton}>
+      <IconWrap
+        {...(onIconPress
+          ? { accessibilityRole: 'button' as const, accessibilityLabel: iconAccessibilityLabel ?? title, onPress: onIconPress }
+          : {})}
+        style={styles.bellButton}
+      >
         <Icon size={19} color={colors.ink} strokeWidth={2.3} />
-      </View>
+      </IconWrap>
     </View>
   );
 }
@@ -7017,7 +7366,6 @@ function TodayTourOverlay({
   totalSteps,
   topInset,
   bottomInset,
-  contentMaxWidth,
   onNext,
   onSkip,
 }: {
@@ -7027,52 +7375,21 @@ function TodayTourOverlay({
   totalSteps: number;
   topInset: number;
   bottomInset: number;
-  contentMaxWidth?: number;
   onNext: () => void;
   onSkip: () => void;
 }) {
-  const { width, height } = useWindowDimensions();
+  const { height } = useWindowDimensions();
 
   if (!visible) {
     return null;
   }
 
-  const screenPadding = 20;
-  const contentWidth = contentMaxWidth ? Math.min(width, contentMaxWidth) : width;
-  const contentLeft = (width - contentWidth) / 2;
-  const topRowOffset = 8;
-  const pillWidth = 46;
-  const pillGap = 5;
-  const pillHeight = 34;
-  const iconOffsetFromPillLeft = 13;
-  const metricIndex = step.id === 'streak' ? 0 : step.id === 'points' ? 1 : 2;
-  const statRowWidth = pillWidth * 3 + pillGap * 2;
-  const firstPillLeft = contentLeft + contentWidth - screenPadding - statRowWidth;
-  const iconCenterX = firstPillLeft + metricIndex * (pillWidth + pillGap) + iconOffsetFromPillLeft;
-  const iconCenterY = topInset + topRowOffset + ((52 - pillHeight) / 2) + (pillHeight / 2);
-  const spotlightSize = 34;
   const rawCardTop = step.id === 'goal' ? Math.max(topInset + 332, 330) : Math.max(topInset + 76, 92);
   const cardTop = Math.max(topInset + 72, Math.min(rawCardTop, height - bottomInset - 236));
-  const spotlightStyle: ViewStyle = step.id === 'goal'
-    ? {
-        width: Math.min(width - 72, 246),
-        height: Math.min(width - 72, 246),
-        borderRadius: 132,
-        left: (width - Math.min(width - 72, 246)) / 2,
-        top: Math.max(topInset + 114, 124),
-      }
-    : {
-        width: spotlightSize,
-        height: spotlightSize,
-        borderRadius: spotlightSize / 2,
-        left: iconCenterX - spotlightSize / 2,
-        top: iconCenterY - spotlightSize / 2,
-      };
 
   return (
     <View style={styles.tourRoot}>
       <View style={styles.tourScrim} />
-      <View pointerEvents="none" style={[styles.tourSpotlight, spotlightStyle, { borderColor: step.color }]} />
       <View style={[styles.tourCard, { top: cardTop }]}>
         <View style={[styles.tourIcon, { backgroundColor: `${step.color}18` }]}>
           <Text style={styles.tourIconText}>{step.icon}</Text>
@@ -7434,7 +7751,7 @@ function AskFloLauncher({
   onOpen: () => void;
 }) {
   const { width, height } = useWindowDimensions();
-  const compactLauncher = width >= TABLET_MIN_WIDTH;
+  const compactLauncher = width < TABLET_MIN_WIDTH;
   const launcherWidth = compactLauncher ? ASK_FLO_HEIGHT : ASK_FLO_WIDTH;
   const edgePadding = compactLauncher ? 22 : ASK_FLO_EDGE_PADDING;
   const translateX = useSharedValue(0);
@@ -7451,7 +7768,8 @@ function AskFloLauncher({
     const minX = edgePadding;
     const minY = Math.max(topInset + edgePadding, edgePadding);
     const maxX = Math.max(minX, width - launcherWidth - edgePadding);
-    const navTop = height - bottomInset - NAV_BOTTOM_OFFSET - NAV_HEIGHT;
+    const navBottom = Platform.OS === 'android' ? 24 : Math.max(20, bottomInset + 8);
+    const navTop = height - navBottom - 76;
     const maxY = Math.max(minY, navTop - ASK_FLO_NAV_GAP - ASK_FLO_HEIGHT);
     return { minX, minY, maxX, maxY };
   }, [bottomInset, edgePadding, height, launcherWidth, topInset, width]);
@@ -7665,9 +7983,9 @@ function BottomNav({
   const activeIndex = activeTab === 'today' ? 0 : activeTab === 'progress' ? 1 : activeTab === 'insights' ? 3 : 4;
   const mounted = useRef(new Animated.Value(0)).current;
   const indicator = useRef(new Animated.Value(activeIndex)).current;
-  const itemWidth = width < 380 ? 44 : 48;
+  const itemWidth = width < 380 ? 50 : 52;
   const knobSize = width < 380 ? 60 : 64;
-  const gap = width < 380 ? 14 : 16;
+  const gap = width < 380 ? 8 : 12;
   const padX = width < 380 ? 8 : 10;
   const step = itemWidth + gap;
   const navWidth = itemWidth * 5 + gap * 4 + padX * 2;
@@ -7772,7 +8090,7 @@ function NavItem({
       style={[styles.glassNavItem, { width: itemWidth }, active && styles.glassNavItemActive]}
     >
       <Icon size={20} color={active ? navGlassColors.activeIcon : navGlassColors.inactiveIcon} strokeWidth={active ? 2.35 : 1.9} />
-      <Text style={[styles.glassNavLabel, active && styles.glassNavLabelActive]}>{label}</Text>
+      <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.85} style={[styles.glassNavLabel, active && styles.glassNavLabelActive]}>{label}</Text>
     </Pressable>
   );
 }
@@ -9046,6 +9364,30 @@ const styles = StyleSheet.create({
     marginTop: 7,
     maxWidth: 360,
   },
+  onboardingSelectionSummary: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: -4,
+    marginBottom: 14,
+  },
+  onboardingSelectionChip: {
+    minHeight: 28,
+    maxWidth: '48%',
+    borderRadius: 999,
+    backgroundColor: 'rgba(79,168,255,0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(79,168,255,0.24)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  onboardingSelectionText: {
+    fontFamily: fontBodyExtra,
+    fontSize: 11.5,
+    color: colors.blue1,
+  },
   dreamGrid: {
     gap: 10,
     marginBottom: 14,
@@ -9755,6 +10097,30 @@ const styles = StyleSheet.create({
     width: '100%',
     flex: 1,
   },
+  tabLoadingOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: NAV_HEIGHT + 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 20,
+  },
+  tabLoadingPill: {
+    minWidth: 54,
+    minHeight: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.9)',
+    borderWidth: 1,
+    borderColor: 'rgba(120,140,180,0.14)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...shadow,
+    shadowOpacity: 0.1,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
+  },
   screenScroll: {
     flexGrow: 1,
     paddingHorizontal: 20,
@@ -10287,17 +10653,7 @@ const styles = StyleSheet.create({
     right: 0,
     top: 0,
     bottom: 0,
-    backgroundColor: 'rgba(10,18,38,0.48)',
-  },
-  tourSpotlight: {
-    position: 'absolute',
-    borderWidth: 3,
-    backgroundColor: 'rgba(255,255,255,0.18)',
-    shadowColor: '#FFFFFF',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.7,
-    shadowRadius: 16,
-    elevation: 10,
+    backgroundColor: '#EEF1F4',
   },
   tourCard: {
     position: 'absolute',
@@ -11149,6 +11505,27 @@ const styles = StyleSheet.create({
     paddingHorizontal: 9,
     paddingVertical: 4,
     marginTop: 7,
+  },
+  settingsPageHeader: {
+    minHeight: 52,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 18,
+  },
+  settingsBackButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: 'rgba(120,140,180,0.14)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...shadow,
+    shadowOpacity: 0.12,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 6 },
   },
   pstatGrid: {
     flexDirection: 'row',
