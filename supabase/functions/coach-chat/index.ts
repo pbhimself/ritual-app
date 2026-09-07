@@ -45,6 +45,7 @@ serve(async (req) => {
   const supabaseUrl = Deno.env.get('SUPABASE_URL');
   const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY');
   const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
+  const nvidiaKey = Deno.env.get('NVIDIA_API_KEY');
 
   if (!supabaseUrl || !supabaseAnonKey) {
     return Response.json({ error: 'Missing Supabase environment' }, { status: 500, headers: corsHeaders });
@@ -97,17 +98,49 @@ serve(async (req) => {
 
   const fallback = buildFallbackReply(message, coachData.summary);
 
-  if (!anthropicKey) {
+  if (!nvidiaKey && !anthropicKey) {
     return Response.json(fallback, { headers: corsHeaders });
   }
 
-  const claudeReply = await callClaude(anthropicKey, message, conversationHistory, coachData, fallback).catch((error) => {
-    console.error('Claude request failed', error);
-    return fallback;
-  });
+  const claudeReply = nvidiaKey
+    ? await callNvidia(nvidiaKey, message, conversationHistory, coachData, fallback).catch(() => fallback)
+    : anthropicKey
+      ? await callClaude(anthropicKey, message, conversationHistory, coachData, fallback).catch((error) => {
+        console.error('Claude request failed', error);
+        return fallback;
+      })
+      : fallback;
 
   return Response.json(claudeReply, { headers: corsHeaders });
 });
+
+async function callNvidia(
+  apiKey: string,
+  message: string,
+  conversationHistory: ConversationItem[],
+  coachData: unknown,
+  fallback: ReturnType<typeof buildFallbackReply>,
+) {
+  const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'moonshotai/kimi-k3',
+      max_tokens: 900,
+      temperature: 0.4,
+      stream: false,
+      messages: [
+        { role: 'system', content: 'You are Rituals Coach. Be supportive, honest, concise, and reason only from the supplied user data. Never invent metrics or claim an action was applied. Return plain text.' },
+        ...conversationHistory.slice(-8).map((item) => ({ role: item.role, content: item.text })),
+        { role: 'user', content: JSON.stringify({ message, coachData }) },
+      ],
+    }),
+  });
+  if (!response.ok) return fallback;
+  const payload = await response.json();
+  const text = payload?.choices?.[0]?.message?.content;
+  return typeof text === 'string' && text.trim() ? { ...fallback, text: text.trim() } : fallback;
+}
 
 async function callClaude(
   anthropicKey: string,
