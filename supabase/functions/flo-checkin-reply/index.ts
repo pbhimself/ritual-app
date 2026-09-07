@@ -55,7 +55,7 @@ serve(async (req) => {
         messages: [
           {
             role: 'system',
-            content: 'You are Flo, the companion inside a ritual habit app. A user missed a scheduled ritual and gave a reason. Respond briefly in 2-4 sentences, warm and curious, never a scold. Return strict JSON with message, category, protect_streak, suggested_action. Category must be aligned_tradeoff, circumstantial, drift, or pattern.',
+            content: 'You are Flo, the companion inside a ritual habit app. A user missed a scheduled ritual and gave a reason. Respond briefly in 2-4 supportive sentences, honest and never insulting. Return strict JSON with message, category, protect_streak, suggested_action, reason_category, reason_summary, and advice. reason_category must be valid_reason, avoidable_distraction, or unclear_reason. Use unclear_reason when the answer is vague such as busy, forgot, or could not do it. Do not invent facts.',
           },
           {
             role: 'user',
@@ -87,12 +87,16 @@ serve(async (req) => {
       && typeof parsed.message === 'string'
       && ['aligned_tradeoff', 'circumstantial', 'drift', 'pattern'].includes(parsed.category)
       && typeof parsed.protect_streak === 'boolean'
+        && ['valid_reason', 'avoidable_distraction', 'unclear_reason'].includes(parsed.reason_category)
     ) {
       return Response.json({
         message: parsed.message,
         category: parsed.category,
         protect_streak: parsed.protect_streak,
         suggested_action: typeof parsed.suggested_action === 'string' ? parsed.suggested_action : null,
+          reason_category: parsed.reason_category,
+          reason_summary: typeof parsed.reason_summary === 'string' ? parsed.reason_summary : reason,
+          advice: typeof parsed.advice === 'string' ? parsed.advice : 'Try making the next version smaller and easier to start.',
       }, { headers: corsHeaders });
     }
   } catch {
@@ -109,25 +113,39 @@ function localFloCheckinReply(
   hasPattern: boolean,
 ) {
   const lower = reason.toLowerCase();
-  const aligned = /chose|family|friend|rest|sleep|work|study|health|needed/i.test(lower) && Boolean(ritual.why);
-  const circumstantial = /came up|traffic|sick|ill|urgent|emergency|late|travel|meeting/i.test(lower);
-  const category = hasPattern ? 'pattern' : aligned ? 'aligned_tradeoff' : circumstantial ? 'circumstantial' : 'drift';
-  const protect = category === 'aligned_tradeoff' || category === 'circumstantial';
-  const suggestedAction = category === 'drift' || category === 'pattern'
-    ? tone === 'coach' && ritual.reminderTime ? 'Move to mornings?' : 'Make it smaller tomorrow?'
-    : null;
-  const whyLine = ritual.why ? ` You started this because it ${ritual.why.replace(/\.$/, '')}.` : '';
-  const toneLine = tone === 'direct'
-    ? ' Be honest about whether this was a real tradeoff or just drift.'
-    : tone === 'coach'
-      ? ' Let us make the next version easier to start.'
-      : ' That is useful information, not a failure.';
-  const patternLine = hasPattern ? ' This same reason has shown up a few times this week, so it may be a pattern worth adjusting.' : '';
+  const valid = /urgent|office|work|health|sick|ill|family|emergency|workload|responsibility|hospital|doctor|travel|traffic|meeting|deadline/i.test(lower);
+  const avoidable = /movie|party|social|scroll|instagram|youtube|gaming|game|timepass|entertainment|netflix|reel|fun/i.test(lower);
+  const unclear = !valid && !avoidable || /busy|forgot|could not|couldn't|not able|no time/i.test(lower);
+  const reasonCategory = avoidable ? 'avoidable_distraction' : valid && !unclear ? 'valid_reason' : 'unclear_reason';
+  const category = hasPattern ? 'pattern' : reasonCategory === 'valid_reason' ? 'circumstantial' : 'drift';
+  const protect = reasonCategory === 'valid_reason';
+  const suggestedAction = reasonCategory === 'avoidable_distraction'
+    ? 'Finish first, entertainment after.'
+    : reasonCategory === 'unclear_reason'
+      ? 'Name the exact blocker.'
+      : 'Reschedule or reduce target.';
+  const advice = reasonCategory === 'valid_reason'
+    ? 'You can reschedule the ritual or reduce today\'s target so the habit still has a clean next step.'
+    : reasonCategory === 'avoidable_distraction'
+      ? 'Complete the ritual before entertainment, or block the distracting app until the ritual is done.'
+      : 'What was the exact blocker: time, energy, place, or another responsibility?';
+  const summary = reasonCategory === 'valid_reason'
+    ? 'The reason appears valid because an unavoidable responsibility or health issue replaced the planned ritual.'
+    : reasonCategory === 'avoidable_distraction'
+      ? 'The reason appears avoidable because entertainment or drift replaced the planned ritual.'
+      : 'The reason is not specific enough to identify the real blocker.';
 
   return {
-    message: `Thanks for naming it.${whyLine}${patternLine}${toneLine}`,
+    message: reasonCategory === 'valid_reason'
+      ? `I understand. I saved this as a valid reason. ${advice}`
+      : reasonCategory === 'avoidable_distraction'
+        ? `I saved your reason. This looks like avoidable time usage because it replaced ${ritual.name}. ${advice}`
+        : `I saved this, but the reason is not fully clear. ${advice}`,
     category,
     protect_streak: protect,
     suggested_action: suggestedAction,
+    reason_category: reasonCategory,
+    reason_summary: summary,
+    advice,
   };
 }

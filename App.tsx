@@ -4,6 +4,8 @@ import { BlurView } from 'expo-blur';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import { StatusBar } from 'expo-status-bar';
+import * as Print from 'expo-print';
+import * as Sharing from 'expo-sharing';
 import Constants from 'expo-constants';
 import * as ExpoLinking from 'expo-linking';
 import DateTimePicker from '@react-native-community/datetimepicker';
@@ -13,6 +15,7 @@ import {
   Dimensions,
   Easing,
   FlatList,
+  Keyboard,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -85,6 +88,7 @@ import {
   Sun,
   Trash2,
   User,
+  X,
   Zap,
 } from 'lucide-react-native';
 import React, { ComponentType, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -164,6 +168,7 @@ type FlowSettings = {
   messageAlerts: boolean;
   haptics: boolean;
   floTone: FloTone;
+  reportIntervalDays: 1 | 7 | 10 | 15 | 30;
 };
 
 type RitualCheckin = {
@@ -176,6 +181,15 @@ type RitualCheckin = {
   floMessage: string;
   streakProtected: boolean;
   suggestedAction: string | null;
+  taskCategory?: string;
+  plannedClosingTime?: string;
+  reminderTime?: string;
+  actualResponseTime?: string;
+  completionStatus?: 'completed_late' | 'not_completed' | 'completed_on_time';
+  completedLate?: boolean;
+  aiReasonCategory?: 'valid_reason' | 'avoidable_distraction' | 'unclear_reason';
+  aiReasonSummary?: string;
+  aiAdvice?: string;
   resolvedAt?: number;
 };
 
@@ -321,6 +335,15 @@ type SupabaseRitualCheckin = {
   flo_message?: string | null;
   streak_protected?: boolean | null;
   suggested_action?: string | null;
+  task_category?: string | null;
+  planned_closing_time?: string | null;
+  reminder_time?: string | null;
+  actual_response_time?: string | null;
+  completion_status?: RitualCheckin['completionStatus'] | null;
+  completed_late?: boolean | null;
+  ai_reason_category?: RitualCheckin['aiReasonCategory'] | null;
+  ai_reason_summary?: string | null;
+  ai_advice?: string | null;
   created_at?: string | null;
 };
 
@@ -341,6 +364,7 @@ type SupabaseProfile = {
   habit_focus?: string | null;
   profile_complete?: boolean | null;
   profile_setup_skipped?: boolean | null;
+  report_interval_days?: number | null;
 };
 
 type ReminderScheduleRecord = Record<string, { notificationId: string; reminderTime: string; body: string }>;
@@ -362,13 +386,13 @@ const APP_SCHEME = 'com.pratikbhangale.rituals';
 const AUTH_CALLBACK_PATH = 'auth/callback';
 const DEFAULT_COUNTRY_CODE = '+91';
 const DEFAULT_COUNTRY_FLAG = '🇮🇳';
-const PROFILE_SELECT = 'id,username,name,email,avatar_emoji,haptics_enabled,push_enabled,age,city,mobile,country_code,gender,habit_focus,profile_complete,profile_setup_skipped';
+const PROFILE_SELECT = 'id,username,name,email,avatar_emoji,haptics_enabled,push_enabled,flo_tone,report_interval_days,age,city,mobile,country_code,gender,habit_focus,profile_complete,profile_setup_skipped';
 const NAV_HEIGHT = 72;
 const NAV_BOTTOM_OFFSET = 0;
 const ASK_FLO_WIDTH = 136;
 const ASK_FLO_HEIGHT = 48;
 const ASK_FLO_EDGE_PADDING = 16;
-const ASK_FLO_NAV_GAP = 28;
+const ASK_FLO_NAV_GAP = 12;
 const ASK_FLO_TAP_THRESHOLD = 6;
 const TABLET_MIN_WIDTH = 720;
 const WIDE_TABLET_MIN_WIDTH = 900;
@@ -383,6 +407,17 @@ const DEFAULT_AUTH_ACCOUNT: AuthAccount = {
   password: 'Pratik@16',
   email: 'pratik@rituals.app',
   name: 'Pratik',
+  countryCode: DEFAULT_COUNTRY_CODE,
+  profileComplete: true,
+  profileSetupSkipped: false,
+  starterOnboardingPending: false,
+};
+const TEST_AUTH_ACCOUNT: AuthAccount = {
+  id: 'local-test-user',
+  username: 'test',
+  password: 'test',
+  email: 'test@rituals.local',
+  name: 'Test User',
   countryCode: DEFAULT_COUNTRY_CODE,
   profileComplete: true,
   profileSetupSkipped: false,
@@ -789,6 +824,7 @@ const seedSettings: FlowSettings = {
   messageAlerts: true,
   haptics: true,
   floTone: 'gentle',
+  reportIntervalDays: 7,
 };
 
 const seedRituals: Ritual[] = [];
@@ -943,7 +979,7 @@ function scheduleWebReminderTimer(storageKey: string, ritual: Ritual, body: stri
     return null;
   }
   const key = `${storageKey}:${ritual.id}`;
-  const fireAt = nextReminderDate(ritual.reminderTime);
+  const fireAt = nextLateReminderDate(ritual.reminderTime);
   const delay = Math.max(0, Math.min(fireAt.getTime() - Date.now(), 2147483647));
   const timer = setTimeout(() => {
     try {
@@ -951,7 +987,7 @@ function scheduleWebReminderTimer(storageKey: string, ritual: Ritual, body: stri
         body,
         tag: key,
         renotify: false,
-        data: { ritualId: ritual.id, screen: 'today' },
+        data: { ritualId: ritual.id, screen: 'coach', missedTask: true },
       });
     } catch {
       // Browser notification support varies; failed notifications should not break the app.
@@ -1016,7 +1052,7 @@ async function syncRitualReminderNotifications({
   enabled: boolean;
   notifications: {
     AndroidImportance?: { DEFAULT?: number };
-    SchedulableTriggerInputTypes?: { DAILY?: string };
+    SchedulableTriggerInputTypes?: { DATE?: string };
     setNotificationChannelAsync?: (id: string, channel: Record<string, unknown>) => Promise<unknown>;
     getPermissionsAsync: () => Promise<{ granted?: boolean; status?: string }>;
     requestPermissionsAsync: () => Promise<{ granted?: boolean; status?: string }>;
@@ -1075,18 +1111,17 @@ async function syncRitualReminderNotifications({
       continue;
     }
     await cancelStored(existing);
-    const [hourRaw, minuteRaw] = ritual.reminderTime.split(':');
+    const reminderDate = nextLateReminderDate(ritual.reminderTime);
     const notificationId = await notifications.scheduleNotificationAsync({
       content: {
-        title: ritualReminderTitle(ritual.name),
-        body,
+        title: `${ritual.name} is still pending`,
+        body: `Did you complete ${ritual.name}? Tap to tell Flo.`,
         sound: false,
-        data: { ritualId: ritual.id, screen: 'today' },
+        data: { ritualId: ritual.id, screen: 'coach', missedTask: true },
       },
       trigger: {
-        type: notifications.SchedulableTriggerInputTypes?.DAILY ?? 'daily',
-        hour: Number(hourRaw) || 8,
-        minute: Number(minuteRaw) || 0,
+        type: notifications.SchedulableTriggerInputTypes?.DATE ?? 'date',
+        date: reminderDate,
         channelId: REMINDER_NOTIFICATION_CHANNEL_ID,
       },
     });
@@ -1257,6 +1292,10 @@ function isCheckinCategory(value: unknown): value is CheckinCategory {
   return value === 'aligned_tradeoff' || value === 'circumstantial' || value === 'drift' || value === 'pattern';
 }
 
+function isAiReasonCategory(value: unknown): value is NonNullable<RitualCheckin['aiReasonCategory']> {
+  return value === 'valid_reason' || value === 'avoidable_distraction' || value === 'unclear_reason';
+}
+
 function isGoalUnit(value: unknown): value is GoalUnit {
   return value === 'liters' || value === 'minutes' || value === 'hours' || value === 'pages' || value === 'reps' || value === 'glasses' || value === 'meals' || value === 'sessions';
 }
@@ -1333,6 +1372,15 @@ function normalizeCheckins(value: unknown): RitualCheckin[] {
         floMessage: raw.floMessage || 'Thanks for naming what happened. One honest check-in is still part of the ritual.',
         streakProtected: Boolean(raw.streakProtected),
         suggestedAction: typeof raw.suggestedAction === 'string' ? raw.suggestedAction : null,
+        taskCategory: raw.taskCategory,
+        plannedClosingTime: raw.plannedClosingTime,
+        reminderTime: raw.reminderTime,
+        actualResponseTime: raw.actualResponseTime,
+        completionStatus: raw.completionStatus,
+        completedLate: Boolean(raw.completedLate),
+        aiReasonCategory: raw.aiReasonCategory,
+        aiReasonSummary: raw.aiReasonSummary,
+        aiAdvice: raw.aiAdvice,
       };
       if (typeof raw.resolvedAt === 'number') {
         normalized.resolvedAt = raw.resolvedAt;
@@ -1397,6 +1445,15 @@ function nextReminderDate(value: string) {
   return date;
 }
 
+function nextLateReminderDate(value: string) {
+  const date = dateFromReminderTime(value);
+  date.setHours(date.getHours() + 1);
+  if (date.getTime() <= Date.now()) {
+    date.setDate(date.getDate() + 1);
+  }
+  return date;
+}
+
 function ritualReminderBody(name: string, goalAmount: number | undefined, goalUnit: GoalUnit | undefined) {
   const displayName = name.trim() || 'your ritual';
   const goal = goalLabel(goalAmount, goalUnit);
@@ -1453,25 +1510,39 @@ function recentPatternForReason(checkins: RitualCheckin[], reason: string, date 
 
 function localFloCheckinReply(ritual: Ritual, reason: string, tone: FloTone, hasPattern: boolean) {
   const lower = reason.toLowerCase();
-  const aligned = /chose|family|friend|rest|sleep|work|study|health|needed/i.test(lower) && Boolean(ritual.why);
-  const circumstantial = /came up|traffic|sick|ill|urgent|emergency|late|travel|meeting/i.test(lower);
-  const category: CheckinCategory = hasPattern ? 'pattern' : aligned ? 'aligned_tradeoff' : circumstantial ? 'circumstantial' : 'drift';
-  const protect = category === 'aligned_tradeoff' || category === 'circumstantial';
-  const suggestedAction = category === 'drift' || category === 'pattern'
-    ? tone === 'coach' && ritual.reminderTime ? 'Move to mornings?' : 'Make it smaller tomorrow?'
-    : null;
-  const whyLine = ritual.why ? ` You started this because it ${ritual.why.replace(/\.$/, '')}.` : '';
-  const toneLine = tone === 'direct'
-    ? ' Be honest about whether this was a real tradeoff or just drift.'
-    : tone === 'coach'
-      ? ' Let us make the next version easier to start.'
-      : ' That is useful information, not a failure.';
-  const patternLine = hasPattern ? ' This same reason has shown up a few times this week, so it may be a pattern worth adjusting.' : '';
+  const valid = /urgent|office|work|health|sick|ill|family|emergency|workload|responsibility|hospital|doctor|travel|traffic|meeting|deadline/i.test(lower);
+  const avoidable = /movie|party|social|scroll|instagram|youtube|gaming|game|timepass|entertainment|netflix|reel|fun/i.test(lower);
+  const unclear = !valid && !avoidable || /busy|forgot|could not|couldn't|not able|no time/i.test(lower);
+  const reasonCategory = avoidable ? 'avoidable_distraction' : valid && !unclear ? 'valid_reason' : 'unclear_reason';
+  const category: CheckinCategory = hasPattern ? 'pattern' : reasonCategory === 'valid_reason' ? 'circumstantial' : 'drift';
+  const protect = reasonCategory === 'valid_reason';
+  const suggestedAction = reasonCategory === 'avoidable_distraction'
+    ? 'Finish first, entertainment after.'
+    : reasonCategory === 'unclear_reason'
+      ? 'Name the exact blocker.'
+      : 'Reschedule or reduce target.';
+  const advice = reasonCategory === 'valid_reason'
+    ? 'You can reschedule the ritual or reduce today\'s target so the habit still has a clean next step.'
+    : reasonCategory === 'avoidable_distraction'
+      ? 'Complete the ritual before entertainment, or block the distracting app until the ritual is done.'
+      : 'What was the exact blocker: time, energy, place, or another responsibility?';
+  const summary = reasonCategory === 'valid_reason'
+    ? 'The reason appears valid because an unavoidable responsibility or health issue replaced the planned ritual.'
+    : reasonCategory === 'avoidable_distraction'
+      ? 'The reason appears avoidable because entertainment or drift replaced the planned ritual.'
+      : 'The reason is not specific enough to identify the real blocker.';
   return {
-    message: `Thanks for naming it.${whyLine}${patternLine}${toneLine}`,
+    message: reasonCategory === 'valid_reason'
+      ? `I understand. I saved this as a valid reason. ${advice}`
+      : reasonCategory === 'avoidable_distraction'
+        ? `I saved your reason. This looks like avoidable time usage because it replaced ${ritual.name}. ${advice}`
+        : `I saved this, but the reason is not fully clear. ${advice}`,
     category,
     protect_streak: protect,
     suggested_action: suggestedAction,
+    reason_category: reasonCategory,
+    reason_summary: summary,
+    advice,
   };
 }
 
@@ -1505,6 +1576,9 @@ async function generateFloCheckinReply(ritual: Ritual, reason: string, tone: Flo
       category: CheckinCategory;
       protect_streak: boolean;
       suggested_action: string | null;
+      reason_category: RitualCheckin['aiReasonCategory'];
+      reason_summary: string;
+      advice: string;
     }>;
 
     if (
@@ -1517,6 +1591,9 @@ async function generateFloCheckinReply(ritual: Ritual, reason: string, tone: Flo
         category: reply.category,
         protect_streak: reply.protect_streak,
         suggested_action: typeof reply.suggested_action === 'string' ? reply.suggested_action : null,
+        reason_category: reply.reason_category,
+        reason_summary: reply.reason_summary,
+        advice: reply.advice,
       };
     }
   } catch {
@@ -1579,11 +1656,15 @@ function normalizeState(parsed: Partial<SavedFlowState> = {}): SavedFlowState {
 }
 
 function normalizeSettings(settings?: Partial<FlowSettings> | null): FlowSettings {
+  const reportIntervalDays = settings?.reportIntervalDays;
   return {
     pushNotifications: typeof settings?.pushNotifications === 'boolean' ? settings.pushNotifications : seedSettings.pushNotifications,
     messageAlerts: typeof settings?.messageAlerts === 'boolean' ? settings.messageAlerts : seedSettings.messageAlerts,
     haptics: typeof settings?.haptics === 'boolean' ? settings.haptics : seedSettings.haptics,
     floTone: isFloTone(settings?.floTone) ? settings.floTone : seedSettings.floTone,
+    reportIntervalDays: reportIntervalDays === 1 || reportIntervalDays === 7 || reportIntervalDays === 10 || reportIntervalDays === 15 || reportIntervalDays === 30
+      ? reportIntervalDays
+      : seedSettings.reportIntervalDays,
   };
 }
 
@@ -2142,15 +2223,15 @@ async function loadSupabaseFlowState(userId: string): Promise<Partial<SavedFlowS
 
   const profile = await supabase
     .from('profiles')
-    .select('haptics_enabled,push_enabled,flo_tone')
+    .select('haptics_enabled,push_enabled,flo_tone,report_interval_days')
     .eq('id', userId)
     .maybeSingle();
-  const profileData = profile.data as Pick<SupabaseProfile, 'haptics_enabled' | 'push_enabled' | 'flo_tone'> | null;
+  const profileData = profile.data as Pick<SupabaseProfile, 'haptics_enabled' | 'push_enabled' | 'flo_tone' | 'report_interval_days'> | null;
   let checkins: RitualCheckin[] = [];
   try {
     const { data } = await supabase
       .from('ritual_checkins')
-      .select('id,ritual_id,habit_id,checkin_date,date,scheduled_window,user_reason_raw,category,flo_message,streak_protected,suggested_action,created_at')
+      .select('id,ritual_id,habit_id,checkin_date,date,scheduled_window,user_reason_raw,category,flo_message,streak_protected,suggested_action,task_category,planned_closing_time,reminder_time,actual_response_time,completion_status,completed_late,ai_reason_category,ai_reason_summary,ai_advice,created_at')
       .eq('user_id', userId)
       .gte('checkin_date', isoDaysBack(30)[0]);
     checkins = ((data ?? []) as SupabaseRitualCheckin[]).map((row, index) => ({
@@ -2163,6 +2244,15 @@ async function loadSupabaseFlowState(userId: string): Promise<Partial<SavedFlowS
       floMessage: row.flo_message || 'Thanks for checking in.',
       streakProtected: Boolean(row.streak_protected),
       suggestedAction: row.suggested_action ?? null,
+      taskCategory: row.task_category ?? undefined,
+      plannedClosingTime: row.planned_closing_time ?? undefined,
+      reminderTime: row.reminder_time ?? undefined,
+      actualResponseTime: row.actual_response_time ?? undefined,
+      completionStatus: row.completion_status ?? undefined,
+      completedLate: Boolean(row.completed_late),
+      aiReasonCategory: row.ai_reason_category ?? undefined,
+      aiReasonSummary: row.ai_reason_summary ?? undefined,
+      aiAdvice: row.ai_advice ?? undefined,
       resolvedAt: row.created_at ? Date.parse(row.created_at) : undefined,
     })).filter((checkin) => Boolean(checkin.ritualId));
   } catch {
@@ -2180,6 +2270,9 @@ async function loadSupabaseFlowState(userId: string): Promise<Partial<SavedFlowS
       haptics: profileData?.haptics_enabled ?? seedSettings.haptics,
       pushNotifications: profileData?.push_enabled ?? seedSettings.pushNotifications,
       floTone: isFloTone(profileData?.flo_tone) ? profileData.flo_tone : seedSettings.floTone,
+      reportIntervalDays: profileData?.report_interval_days === 1 || profileData?.report_interval_days === 7 || profileData?.report_interval_days === 10 || profileData?.report_interval_days === 15 || profileData?.report_interval_days === 30
+        ? profileData.report_interval_days
+        : seedSettings.reportIntervalDays,
     },
   };
 }
@@ -2200,9 +2293,29 @@ function AuthenticatedApp() {
   const [signedIn, setSignedIn] = useState(false);
   const [profileSetupSource, setProfileSetupSource] = useState<'create' | 'profile' | null>(null);
   const [flowInitialTab, setFlowInitialTab] = useState<TabKey>('today');
+  const [notificationRitualId, setNotificationRitualId] = useState<string | null>(null);
   const [authGateError, setAuthGateError] = useState('');
   const [authGateMessage, setAuthGateMessage] = useState('');
   const reduceMotion = useReducedMotion();
+
+  useEffect(() => {
+    if (!notificationsModule || Platform.OS === 'web') {
+      return undefined;
+    }
+    const handleResponse = (response: { notification?: { request?: { content?: { data?: Record<string, unknown> } } } }) => {
+      const data = response.notification?.request?.content?.data;
+      if (data?.missedTask === true && typeof data.ritualId === 'string') {
+        setNotificationRitualId(data.ritualId);
+      }
+    };
+    notificationsModule.getLastNotificationResponseAsync?.().then((response) => {
+      if (response) {
+        handleResponse(response);
+      }
+    }).catch(() => undefined);
+    const subscription = notificationsModule.addNotificationResponseReceivedListener?.(handleResponse);
+    return () => subscription?.remove();
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -2505,6 +2618,7 @@ function AuthenticatedApp() {
   return (
     <FlowApp
       userId={account.id}
+      initialMissedRitualId={notificationRitualId}
       initialTab={flowInitialTab}
       username={account.username}
       email={account.email}
@@ -2632,6 +2746,17 @@ function AuthGate({
     clearFeedback();
     if (!identifier.trim() || !password) {
       setError('Enter your email or username and password.');
+      return;
+    }
+    if (matchesAccount(TEST_AUTH_ACCOUNT)) {
+      setSubmitting(true);
+      const nextAccount = await withFirstRunTourPending(TEST_AUTH_ACCOUNT);
+      await AsyncStorage.setItem(
+        AUTH_STORAGE_KEY,
+        JSON.stringify({ account: nextAccount, signedIn: rememberMe }),
+      ).catch(() => undefined);
+      setSubmitting(false);
+      onLogin(nextAccount);
       return;
     }
     if (!supabase) {
@@ -4289,6 +4414,7 @@ function PressScale({
 
 function FlowApp({
   userId,
+  initialMissedRitualId,
   initialTab = 'today',
   username,
   email,
@@ -4300,6 +4426,7 @@ function FlowApp({
   onLogout,
 }: {
   userId?: string;
+  initialMissedRitualId?: string | null;
   initialTab?: TabKey;
   username: string;
   email?: string;
@@ -4345,11 +4472,21 @@ function FlowApp({
   const todayTourSeenStorageKey = useMemo(() => `${TODAY_TOUR_SEEN_STORAGE_KEY}:${userId ?? 'local'}`, [userId]);
   const reminderStorageKey = useMemo(() => `${REMINDER_NOTIFICATION_STORAGE_KEY}:${userId ?? 'local'}`, [userId]);
   const canUseRemote = Boolean(supabase && userId && !userId.startsWith('local-'));
+  const closeCoach = useCallback(() => {
+    Keyboard.dismiss();
+    setCoachOpen(false);
+  }, []);
 
   useEffect(() => {
     setStarterOnboardingAllowed(starterOnboardingPending && firstRunTourPending);
     setTodayTourSeen(!firstRunTourPending);
   }, [firstRunTourPending, starterOnboardingPending, userId]);
+
+  useEffect(() => {
+    if (hydrated && initialMissedRitualId) {
+      setCoachOpen(true);
+    }
+  }, [hydrated, initialMissedRitualId]);
 
   useEffect(() => {
     let mounted = true;
@@ -4610,19 +4747,31 @@ function FlowApp({
           flo_message: record.floMessage,
           streak_protected: record.streakProtected,
           suggested_action: record.suggestedAction,
+          task_category: record.taskCategory ?? null,
+          planned_closing_time: record.plannedClosingTime ?? null,
+          reminder_time: record.reminderTime ?? null,
+          actual_response_time: record.actualResponseTime ?? null,
+          completion_status: record.completionStatus ?? 'not_completed',
+          completed_late: record.completedLate ?? false,
+          ai_reason_category: record.aiReasonCategory ?? null,
+          ai_reason_summary: record.aiReasonSummary ?? null,
+          ai_advice: record.aiAdvice ?? null,
         })),
         { onConflict: 'id' },
       )
       .then(() => undefined);
   }, [canUseRemote, userId]);
 
-  const submitCheckin = useCallback(async (reason: string) => {
+  const submitCheckin = useCallback(async (reason: string, ritualId?: string) => {
     const trimmed = reason.trim();
     if (!pendingCheckinRituals.length || !trimmed) {
       return;
     }
     const created: RitualCheckin[] = [];
-    for (const ritual of pendingCheckinRituals) {
+    const targets = ritualId
+      ? pendingCheckinRituals.filter((ritual) => ritual.id === ritualId)
+      : pendingCheckinRituals;
+    for (const ritual of targets) {
       const hasPattern = recentPatternForReason(checkins, trimmed);
       const reply = await generateFloCheckinReply(ritual, trimmed, settings.floTone, hasPattern);
       created.push({
@@ -4635,6 +4784,15 @@ function FlowApp({
         floMessage: reply.message,
         streakProtected: reply.protect_streak,
         suggestedAction: reply.suggested_action,
+        taskCategory: ritual.paletteKey,
+        plannedClosingTime: ritual.reminderTime ? dateFromReminderTime(ritual.reminderTime).toISOString() : undefined,
+        reminderTime: ritual.reminderTime ? nextLateReminderDate(ritual.reminderTime).toISOString() : undefined,
+        actualResponseTime: new Date().toISOString(),
+        completionStatus: 'not_completed',
+        completedLate: false,
+        aiReasonCategory: isAiReasonCategory(reply.reason_category) ? reply.reason_category : 'unclear_reason',
+        aiReasonSummary: reply.reason_summary,
+        aiAdvice: reply.advice,
         resolvedAt: Date.now(),
       });
     }
@@ -4808,6 +4966,37 @@ function FlowApp({
     }
   };
 
+  const completeLateRitual = (ritual: Ritual) => {
+    if (ritual.doneToday) {
+      return;
+    }
+    toggleRitual(ritual.id, 0, 0);
+    const record: RitualCheckin = {
+      id: `late-completion-${ritual.id}-${todayIso()}`,
+      ritualId: ritual.id,
+      date: todayIso(),
+      scheduledWindow: reminderWindowLabel(ritual.reminderTime),
+      userReasonRaw: 'Completed after reminder',
+      category: 'circumstantial',
+      floMessage: `Good job. I marked ${ritual.name} completed. Try to update it on time next time.`,
+      streakProtected: false,
+      suggestedAction: 'Try completing it before the reminder next time.',
+      taskCategory: ritual.paletteKey,
+      plannedClosingTime: ritual.reminderTime ? dateFromReminderTime(ritual.reminderTime).toISOString() : undefined,
+      reminderTime: ritual.reminderTime ? nextLateReminderDate(ritual.reminderTime).toISOString() : undefined,
+      actualResponseTime: new Date().toISOString(),
+      completionStatus: 'completed_late',
+      completedLate: true,
+      aiReasonCategory: 'valid_reason',
+      aiReasonSummary: 'User confirmed completion after the reminder.',
+      aiAdvice: 'Try to update the ritual before the closing time next time.',
+      resolvedAt: Date.now(),
+    };
+    setCheckins((current) => [record, ...current]);
+    persistCheckinsRemote([record]);
+    showToast(`Good job. ${ritual.name} marked completed late.`);
+  };
+
   const addRitual = async (input: CreateRitualInput) => {
     const name = input.name.trim();
     const icon = input.icon;
@@ -4970,7 +5159,7 @@ function FlowApp({
     if (!supabase || !canUseRemote || !userId) {
       return;
     }
-    const column = key === 'haptics' ? 'haptics_enabled' : key === 'pushNotifications' ? 'push_enabled' : key === 'floTone' ? 'flo_tone' : null;
+    const column = key === 'haptics' ? 'haptics_enabled' : key === 'pushNotifications' ? 'push_enabled' : key === 'floTone' ? 'flo_tone' : key === 'reportIntervalDays' ? 'report_interval_days' : null;
     if (!column) {
       return;
     }
@@ -5146,7 +5335,7 @@ function FlowApp({
             />
           ) : null}
           {activeTab === 'insights' ? (
-            <InsightsScreen rituals={rituals} insight={insight} reduceMotion={reduceMotion} onGenerate={generateInsight} />
+            <InsightsScreen rituals={rituals} checkins={checkins} insight={insight} reduceMotion={reduceMotion} onGenerate={generateInsight} reportIntervalDays={settings.reportIntervalDays} userName={username} />
           ) : null}
           {activeTab === 'profile' ? (
             <ProfileScreen
@@ -5180,8 +5369,9 @@ function FlowApp({
           pendingCheckinRituals={pendingCheckinRituals}
           latestCheckins={checkins}
           reduceMotion={reduceMotion}
-          onClose={() => setCoachOpen(false)}
+          onClose={closeCoach}
           onSubmitCheckin={submitCheckin}
+          onCompleteLate={completeLateRitual}
           onAddRitual={(name, icon) => addRitual({ name, icon, paletteKey: iconOptionForEmoji(icon).key })}
         />
         <AddRitualSheet
@@ -5252,7 +5442,7 @@ function TodayScreen({
   onToggleRitual: (id: string, x: number, y: number) => void;
   onEditRitual: (ritual: Ritual) => void;
   onOpenProfile: () => void;
-  onSubmitCheckin: (reason: string) => void | Promise<void>;
+  onSubmitCheckin: (reason: string, ritualId?: string) => void | Promise<void>;
 }) {
   const { width } = useWindowDimensions();
   const now = useMinuteNow();
@@ -5962,14 +6152,17 @@ function FloCheckinCard({
   rituals,
   latestCheckins,
   onSubmit,
+  onCompleteLate,
 }: {
   rituals: Ritual[];
   latestCheckins: RitualCheckin[];
-  onSubmit: (reason: string) => void | Promise<void>;
+  onSubmit: (reason: string, ritualId?: string) => void | Promise<void>;
+  onCompleteLate: (ritual: Ritual) => void | Promise<void>;
 }) {
   const [customOpen, setCustomOpen] = useState(false);
   const [customReason, setCustomReason] = useState('');
   const latestToday = latestCheckins.find((checkin) => checkin.date === todayIso());
+  const activeRitual = rituals[0];
   const quickReplies = ['Something came up', 'Chose something else', "Just didn't get to it"];
 
   if (!rituals.length && !latestToday) {
@@ -5988,7 +6181,7 @@ function FloCheckinCard({
     if (!trimmed) {
       return;
     }
-    await onSubmit(trimmed);
+    await onSubmit(trimmed, activeRitual?.id);
     setCustomReason('');
     setCustomOpen(false);
   };
@@ -6007,10 +6200,19 @@ function FloCheckinCard({
 
       {rituals.length ? (
         <>
+          <Text style={styles.floQuestion}>{activeRitual?.name} was not marked complete. Did you complete it?</Text>
+          <View style={styles.floChipRow}>
+            <Pressable accessibilityRole="button" onPress={() => activeRitual && onCompleteLate(activeRitual)} style={styles.floReplyChip}>
+              <Text style={styles.floReplyText}>Yes, I completed it</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" onPress={() => setCustomOpen(true)} style={styles.floReplyChip}>
+              <Text style={styles.floReplyText}>No, I did not</Text>
+            </Pressable>
+          </View>
           <Text style={styles.floQuestion}>What came up?</Text>
           <View style={styles.floChipRow}>
             {quickReplies.map((reply) => (
-              <Pressable key={reply} accessibilityRole="button" onPress={() => onSubmit(reply)} style={styles.floReplyChip}>
+              <Pressable key={reply} accessibilityRole="button" onPress={() => onSubmit(reply, activeRitual?.id)} style={styles.floReplyChip}>
                 <Text style={styles.floReplyText}>{reply}</Text>
               </Pressable>
             ))}
@@ -6565,17 +6767,212 @@ function ProgressScreen({
 
 async function requestCoachReply(message: string, history: CoachMessage[], rituals: Ritual[]) {
   if (supabase) {
-    const { data, error } = await supabase.functions.invoke('coach-chat', {
-      body: {
-        message,
-        conversationHistory: history.map((item) => ({ role: item.role, text: item.text })),
-      },
-    });
-    if (!error && data?.text) {
-      return data as { text: string; insightCard?: CoachInsightCard; suggestedActions?: CoachAction[] };
+    try {
+      const { data, error } = await supabase.functions.invoke('coach-chat', {
+        body: {
+          message,
+          conversationHistory: history.map((item) => ({ role: item.role, text: item.text })),
+        },
+      });
+      if (!error && data?.text) {
+        return data as { text: string; insightCard?: CoachInsightCard; suggestedActions?: CoachAction[] };
+      }
+    } catch {
+      // Fall back to local, real in-memory ritual data when the network or function is unavailable.
     }
   }
   return buildLocalCoachReply(message, rituals);
+}
+
+type ReportExportSource = {
+  rituals: Ritual[];
+  checkins: RitualCheckin[];
+};
+
+async function generateAndShareReport(intervalDays: FlowSettings['reportIntervalDays'], userName: string, localSource?: ReportExportSource) {
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  let report: Record<string, unknown> | null = null;
+  if (supabase) {
+    try {
+      const { data, error } = await supabase.functions.invoke('generate-report', { body: { intervalDays, timeZone } });
+      if (!error && data) {
+        report = data as Record<string, unknown>;
+      }
+    } catch {
+      report = null;
+    }
+  }
+  if (!report && localSource) {
+    report = buildLocalBehaviorReport(intervalDays, localSource);
+  }
+  if (!report) {
+    throw new Error('Report generation requires Supabase Auth or local ritual data.');
+  }
+  const window = report.window as { start?: string; end?: string; intervalDays?: number } | undefined;
+  const selectedDays = Number(window?.intervalDays ?? intervalDays);
+  const list = (value: unknown) => Array.isArray(value) && value.length ? value.map((item) => escapeHtml(String(item))).join(', ') : 'None recorded';
+  const rangeLabel = `${formatReportDate(window?.start)} to ${formatReportDate(window?.end)} (includes today)`;
+  const generatedLabel = formatReportDateTime(new Date());
+  const html = `<!DOCTYPE html>
+<html>
+  <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+      @page { margin: 24px; }
+      body { font-family: Arial, Helvetica, sans-serif; color: #1C2B49; padding: 28px; line-height: 1.45; }
+      h1 { margin: 0 0 6px; font-size: 28px; }
+      h2 { margin: 24px 0 8px; font-size: 18px; }
+      .muted { color: #60708F; }
+      .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+      .metric { border: 1px solid #DDE6F5; border-radius: 12px; padding: 12px; background: #F8FBFF; }
+      .metric strong { display: block; font-size: 22px; color: #1568C9; }
+      .section { border-top: 1px solid #DDE6F5; margin-top: 22px; padding-top: 4px; }
+    </style>
+  </head>
+  <body>
+    <h1>Rituals AI behavior report</h1>
+    <p><strong>${escapeHtml(userName)}</strong></p>
+    <p class="muted">Last ${selectedDays} days: ${rangeLabel}<br/>Generated ${generatedLabel}</p>
+    <div class="grid">
+      <div class="metric"><strong>${Number(report.totalTasksCreated ?? 0)}</strong>Tasks tracked</div>
+      <div class="metric"><strong>${Number(report.completedOnTime ?? 0)}</strong>Completed on time</div>
+      <div class="metric"><strong>${Number(report.completedLate ?? 0)}</strong>Completed late</div>
+      <div class="metric"><strong>${Number(report.notCompleted ?? 0)}</strong>Not completed</div>
+    </div>
+    <div class="section">
+      <h2>Where time is slipping</h2>
+      <p><strong>Most missed category:</strong> ${escapeHtml(String(report.mostMissedTaskCategory ?? 'None recorded'))}<br/>
+      <strong>Avoidable distractions:</strong> ${list(report.commonAvoidableDistractions)}<br/>
+      <strong>Pattern:</strong> ${escapeHtml(String(report.timeWastingPattern ?? 'No pattern recorded'))}</p>
+    </div>
+    <div class="section">
+      <h2>What is working</h2>
+      <p><strong>Valid reasons:</strong> ${list(report.commonValidReasons)}<br/>
+      <strong>Best days:</strong> ${list(report.bestPerformingDays)}<br/>
+      <strong>Weak areas:</strong> ${list(report.weakAreas)}</p>
+    </div>
+    <div class="section">
+      <h2>AI advice</h2>
+      <p>${escapeHtml(String(report.advice ?? 'Keep logging exact blockers so the report can find stronger patterns.'))}</p>
+    </div>
+  </body>
+</html>`;
+  if (Platform.OS === 'web') {
+    await Print.printToFileAsync({ html });
+    return;
+  }
+  const file = await Print.printToFileAsync({ html });
+  if (await Sharing.isAvailableAsync()) {
+    await Sharing.shareAsync(file.uri, { mimeType: 'application/pdf', UTI: 'com.adobe.pdf', dialogTitle: 'Share Rituals report' });
+  } else {
+    throw new Error('PDF sharing is not available on this device.');
+  }
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function formatReportDate(value?: string) {
+  if (!value) {
+    return 'Unknown date';
+  }
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function formatReportDateTime(date: Date) {
+  return date.toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+function buildLocalBehaviorReport(intervalDays: FlowSettings['reportIntervalDays'], source: ReportExportSource): Record<string, unknown> {
+  const days = isoDaysBack(intervalDays);
+  const start = days[0] ?? todayIso();
+  const end = days[days.length - 1] ?? todayIso();
+  const endDate = dateFromIso(end);
+  const checkins = source.checkins.filter((checkin) => checkin.date >= start && checkin.date <= end);
+  const completedLate = checkins.filter((checkin) => checkin.completedLate || checkin.completionStatus === 'completed_late').length;
+  const notCompleted = checkins.filter((checkin) => checkin.completionStatus === 'not_completed').length;
+  const completedTotal = source.rituals.reduce((total, ritual) => total + ritual.heat.slice(-intervalDays).filter(Boolean).length, 0);
+  const missedByCategory = new Map<string, number>();
+  const validReasons = new Map<string, number>();
+  const avoidableReasons = new Map<string, number>();
+
+  checkins.forEach((checkin) => {
+    if (checkin.taskCategory) {
+      const label = categoryDisplayLabel(checkin.taskCategory);
+      missedByCategory.set(label, (missedByCategory.get(label) ?? 0) + 1);
+    }
+    const reason = checkin.userReasonRaw.trim();
+    if (!reason) {
+      return;
+    }
+    if (checkin.aiReasonCategory === 'valid_reason') {
+      validReasons.set(reason, (validReasons.get(reason) ?? 0) + 1);
+    }
+    if (checkin.aiReasonCategory === 'avoidable_distraction') {
+      avoidableReasons.set(reason, (avoidableReasons.get(reason) ?? 0) + 1);
+    }
+  });
+
+  const completedByDay = new Map<string, number>();
+  source.rituals.forEach((ritual) => {
+    const heat = ritual.heat.slice(-days.length);
+    const offset = days.length - heat.length;
+    heat.forEach((done, index) => {
+      const iso = days[offset + index];
+      if (!done || !iso) {
+        return;
+      }
+      const label = formatReportDayLabel(iso);
+      completedByDay.set(label, (completedByDay.get(label) ?? 0) + 1);
+    });
+  });
+
+  const weakAreas = topReportKeys(missedByCategory);
+  const avoidable = topReportKeys(avoidableReasons);
+  const valid = topReportKeys(validReasons);
+
+  return {
+    window: { start, end, intervalDays },
+    totalTasksCreated: source.rituals.filter((ritual) => ritual.createdAt <= (endDate?.getTime() ?? Date.now()) + 86400000).length,
+    completedOnTime: Math.max(0, completedTotal - completedLate),
+    completedLate,
+    notCompleted,
+    mostMissedTaskCategory: weakAreas[0] ?? null,
+    commonValidReasons: valid,
+    commonAvoidableDistractions: avoidable,
+    timeWastingPattern: avoidable.length
+      ? `Avoidable time went mostly into: ${avoidable.join(', ')}.`
+      : 'No repeated avoidable-distraction pattern is recorded for this period.',
+    bestPerformingDays: topReportKeys(completedByDay),
+    weakAreas,
+    advice: avoidable.length
+      ? 'Finish the smallest version of the missed ritual before entertainment, then use entertainment as the reward.'
+      : 'Keep tracking the real reason when a ritual slips; the report becomes sharper with each honest check-in.',
+  };
+}
+
+function categoryDisplayLabel(value: string) {
+  const option = ritualIconLibrary.find((item) => item.key === value);
+  return option?.label ?? value;
+}
+
+function topReportKeys(values: Map<string, number>) {
+  return [...values.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([key]) => key);
+}
+
+function formatReportDayLabel(iso: string) {
+  const date = dateFromIso(iso);
+  return date ? date.toLocaleDateString(undefined, { weekday: 'short' }) : iso;
 }
 
 function buildLocalCoachReply(message: string, rituals: Ritual[]): { text: string; insightCard?: CoachInsightCard; suggestedActions?: CoachAction[] } {
@@ -6632,6 +7029,7 @@ function CoachScreen({
   latestCheckins = [],
   reduceMotion,
   onSubmitCheckin,
+  onCompleteLate,
   onAddRitual,
   sheet = false,
 }: {
@@ -6639,7 +7037,8 @@ function CoachScreen({
   pendingCheckinRituals?: Ritual[];
   latestCheckins?: RitualCheckin[];
   reduceMotion: boolean;
-  onSubmitCheckin?: (reason: string) => void | Promise<void>;
+  onSubmitCheckin?: (reason: string, ritualId?: string) => void | Promise<void>;
+  onCompleteLate?: (ritual: Ritual) => void | Promise<void>;
   onAddRitual: (name: string, icon: string) => void | Promise<void>;
   sheet?: boolean;
 }) {
@@ -6753,7 +7152,7 @@ function CoachScreen({
         ListHeaderComponent={
           onSubmitCheckin ? (
             <>
-              <FloCheckinCard rituals={pendingCheckinRituals} latestCheckins={latestCheckins} onSubmit={onSubmitCheckin} />
+              <FloCheckinCard rituals={pendingCheckinRituals} latestCheckins={latestCheckins} onSubmit={onSubmitCheckin} onCompleteLate={onCompleteLate ?? (() => undefined)} />
               {pendingCheckinRituals.length ? (
                 <Text style={styles.coachCheckinHint}>Flo will use your answer to protect the right streaks and suggest a smaller next action.</Text>
               ) : null}
@@ -6864,18 +7263,32 @@ function CoachInsightCardView({ card }: { card: CoachInsightCard }) {
 
 function InsightsScreen({
   rituals,
+  checkins,
   insight,
   reduceMotion,
   onGenerate,
+  reportIntervalDays,
+  userName,
 }: {
   rituals: Ritual[];
+  checkins: RitualCheckin[];
   insight: string;
   reduceMotion: boolean;
   onGenerate: (text?: string) => void;
+  reportIntervalDays: FlowSettings['reportIntervalDays'];
+  userName: string;
 }) {
   const [loading, setLoading] = useState(false);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportMessage, setReportMessage] = useState('');
+  const [selectedReportDays, setSelectedReportDays] = useState<FlowSettings['reportIntervalDays']>(reportIntervalDays);
   const strongest = bestRitual(rituals);
   const weakest = weakestRitual(rituals);
+  const reportOptions: FlowSettings['reportIntervalDays'][] = [1, 7, 10, 15, 30];
+
+  useEffect(() => {
+    setSelectedReportDays(reportIntervalDays);
+  }, [reportIntervalDays]);
 
   const generate = () => {
     if (loading) {
@@ -6895,9 +7308,52 @@ function InsightsScreen({
     });
   };
 
+  const exportReport = async () => {
+    if (reportLoading) return;
+    setReportLoading(true);
+    setReportMessage('');
+    try {
+      await generateAndShareReport(selectedReportDays, userName, { rituals, checkins });
+      setReportMessage(selectedReportDays === 1 ? 'Today report ready.' : `Last ${selectedReportDays} days report ready.`);
+    } catch (error) {
+      setReportMessage(readableErrorMessage(error) || 'Could not create the PDF report.');
+    } finally {
+      setReportLoading(false);
+    }
+  };
+
   return (
     <ScrollView contentContainerStyle={styles.screenScroll} showsVerticalScrollIndicator={false}>
       <ScreenHeader title="Insights" icon={Settings} />
+      <View style={styles.reportToolbar}>
+        <View style={styles.reportToolbarCopy}>
+          <Text style={styles.reportToolbarTitle}>Behavior report</Text>
+          <Text style={styles.reportToolbarSub}>Choose a window ending today, then export a PDF</Text>
+          <View style={styles.reportIntervalPills}>
+            {reportOptions.map((option) => {
+              const selected = option === selectedReportDays;
+              return (
+                <Pressable
+                  key={option}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected }}
+                  onPress={() => setSelectedReportDays(option)}
+                  style={[styles.reportIntervalPill, selected && styles.reportIntervalPillActive]}
+                >
+                  <Text style={[styles.reportIntervalPillText, selected && styles.reportIntervalPillTextActive]}>
+                    {option === 1 ? 'Today' : `${option}d`}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+        <Pressable accessibilityRole="button" onPress={exportReport} disabled={reportLoading} style={[styles.reportButton, reportLoading && styles.btnPrimaryDisabled]}>
+          <BarChart3 size={15} color="#FFFFFF" strokeWidth={2.4} />
+          <Text style={styles.reportButtonText}>{reportLoading ? 'Preparing' : 'PDF'}</Text>
+        </Pressable>
+      </View>
+      {reportMessage ? <Text style={styles.reportMessage}>{reportMessage}</Text> : null}
       <LinearGradient colors={['#4FA8FF', '#7A79FF']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.insightCta}>
         <Text style={styles.insightSpark}>✨</Text>
         <Text style={styles.insightTitle}>Generate this week's insight</Text>
@@ -7001,6 +7457,11 @@ function ProfileScreen({
             <Text style={styles.settingsLabel}>Experience</Text>
             <ToggleRow icon={Zap} label="Haptics" value={settings.haptics} onChange={(value) => onSettingChange('haptics', value)} />
             <ToneRow value={settings.floTone} onChange={(value) => onSettingChange('floTone', value)} />
+          </View>
+
+          <View style={styles.settingsCard}>
+            <Text style={styles.settingsLabel}>AI reports</Text>
+            <ReportIntervalRow value={settings.reportIntervalDays} onChange={(value) => onSettingChange('reportIntervalDays', value)} />
           </View>
 
           <View style={styles.settingsCard}>
@@ -7673,6 +8134,27 @@ function ToneRow({ value, onChange }: { value: FloTone; onChange: (value: FloTon
   );
 }
 
+function ReportIntervalRow({ value, onChange }: { value: FlowSettings['reportIntervalDays']; onChange: (value: FlowSettings['reportIntervalDays']) => void }) {
+  const options: FlowSettings['reportIntervalDays'][] = [1, 7, 10, 15, 30];
+  return (
+    <View style={styles.settingRowTall}>
+      <View style={styles.settingRowTop}>
+        <View style={styles.settingIcon}>
+          <BarChart3 size={17} color={colors.ink} strokeWidth={2.3} />
+        </View>
+        <Text style={styles.settingName}>Generate report after</Text>
+      </View>
+      <View style={styles.toneSegment}>
+        {options.map((option) => (
+          <Pressable key={option} accessibilityRole="button" accessibilityState={{ selected: value === option }} onPress={() => onChange(option)} style={[styles.toneSegmentButton, value === option && styles.toneSegmentButtonActive]}>
+            <Text style={[styles.toneSegmentText, value === option && styles.toneSegmentTextActive]}>{option}d</Text>
+          </Pressable>
+        ))}
+      </View>
+    </View>
+  );
+}
+
 function InfoRow({
   icon: Icon,
   label,
@@ -7751,7 +8233,7 @@ function AskFloLauncher({
   onOpen: () => void;
 }) {
   const { width, height } = useWindowDimensions();
-  const compactLauncher = width < TABLET_MIN_WIDTH;
+  const compactLauncher = width < 360;
   const launcherWidth = compactLauncher ? ASK_FLO_HEIGHT : ASK_FLO_WIDTH;
   const edgePadding = compactLauncher ? 22 : ASK_FLO_EDGE_PADDING;
   const translateX = useSharedValue(0);
@@ -7782,6 +8264,11 @@ function AskFloLauncher({
     return { x: finalX, y: finalY };
   }, [bounds.maxX, bounds.maxY, bounds.minX, bounds.minY]);
 
+  const isSavedNearCorner = useCallback((x: number, y: number) => {
+    const near = (value: number, target: number) => Math.abs(value - target) <= 36;
+    return (near(x, bounds.minX) || near(x, bounds.maxX)) && (near(y, bounds.minY) || near(y, bounds.maxY));
+  }, [bounds.maxX, bounds.maxY, bounds.minX, bounds.minY]);
+
   useEffect(() => {
     let mounted = true;
     const defaultPosition = snapToCorner(bounds.maxX, bounds.maxY);
@@ -7799,7 +8286,7 @@ function AskFloLauncher({
         const parsed = JSON.parse(stored) as Partial<{ x: number; y: number }>;
         const savedX = typeof parsed.x === 'number' ? parsed.x : defaultPosition.x;
         const savedY = typeof parsed.y === 'number' ? parsed.y : defaultPosition.y;
-        const next = snapToCorner(savedX, savedY);
+        const next = isSavedNearCorner(savedX, savedY) ? snapToCorner(savedX, savedY) : defaultPosition;
         translateX.value = next.x;
         translateY.value = next.y;
       })
@@ -7816,7 +8303,7 @@ function AskFloLauncher({
         clearTimeout(blockTimer.current);
       }
     };
-  }, [bounds.maxX, bounds.maxY, positionKey, snapToCorner, translateX, translateY]);
+  }, [bounds.maxX, bounds.maxY, isSavedNearCorner, positionKey, snapToCorner, translateX, translateY]);
 
   const animatedStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: translateX.value }, { translateY: translateY.value }],
@@ -7912,6 +8399,7 @@ function CoachChatSheet({
   reduceMotion,
   onClose,
   onSubmitCheckin,
+  onCompleteLate,
   onAddRitual,
 }: {
   open: boolean;
@@ -7920,7 +8408,8 @@ function CoachChatSheet({
   latestCheckins: RitualCheckin[];
   reduceMotion: boolean;
   onClose: () => void;
-  onSubmitCheckin: (reason: string) => void | Promise<void>;
+  onSubmitCheckin: (reason: string, ritualId?: string) => void | Promise<void>;
+  onCompleteLate: (ritual: Ritual) => void | Promise<void>;
   onAddRitual: (name: string, icon: string) => void | Promise<void>;
 }) {
   const insets = useSafeAreaInsets();
@@ -7951,12 +8440,22 @@ function CoachChatSheet({
             ]}
           >
             <View style={styles.modalHandle} />
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Close Ask Flo"
+              hitSlop={10}
+              onPress={onClose}
+              style={styles.coachSheetClose}
+            >
+              <X size={18} color={colors.ink} strokeWidth={2.5} />
+            </Pressable>
             <CoachScreen
               rituals={rituals}
               pendingCheckinRituals={pendingCheckinRituals}
               latestCheckins={latestCheckins}
               reduceMotion={reduceMotion}
               onSubmitCheckin={onSubmitCheckin}
+              onCompleteLate={onCompleteLate}
               onAddRitual={onAddRitual}
               sheet
             />
@@ -9841,6 +10340,25 @@ const styles = StyleSheet.create({
     shadowRadius: 32,
     elevation: 24,
   },
+  coachSheetClose: {
+    position: 'absolute',
+    top: 14,
+    right: 16,
+    zIndex: 4,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: 'rgba(120,140,180,0.14)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#1E325A',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.12,
+    shadowRadius: 14,
+    elevation: 6,
+  },
   coachSheetTablet: {
     borderRadius: 30,
   },
@@ -11354,6 +11872,83 @@ const styles = StyleSheet.create({
     fontFamily: fontBodyExtra,
     fontSize: 13.5,
     color: '#1568C9',
+  },
+  reportToolbar: {
+    minHeight: 88,
+    borderRadius: 18,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    paddingHorizontal: 13,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 8,
+  },
+  reportToolbarCopy: {
+    flex: 1,
+    minWidth: 0,
+  },
+  reportToolbarTitle: {
+    fontFamily: fontBodyExtra,
+    fontSize: 13,
+    color: colors.ink,
+  },
+  reportToolbarSub: {
+    fontFamily: fontBody,
+    fontSize: 11,
+    color: colors.inkSoft,
+    marginTop: 2,
+  },
+  reportIntervalPills: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 9,
+  },
+  reportIntervalPill: {
+    minHeight: 28,
+    minWidth: 42,
+    borderRadius: 10,
+    paddingHorizontal: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#F3F6FB',
+    borderWidth: 1,
+    borderColor: 'rgba(120,140,180,0.14)',
+  },
+  reportIntervalPillActive: {
+    backgroundColor: colors.blue1,
+    borderColor: colors.blue1,
+  },
+  reportIntervalPillText: {
+    fontFamily: fontBodyExtra,
+    fontSize: 10.5,
+    color: colors.inkSoft,
+  },
+  reportIntervalPillTextActive: {
+    color: '#FFFFFF',
+  },
+  reportButton: {
+    minHeight: 36,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    backgroundColor: colors.blue1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  reportButtonText: {
+    fontFamily: fontBodyExtra,
+    fontSize: 11.5,
+    color: '#FFFFFF',
+  },
+  reportMessage: {
+    fontFamily: fontBodyBold,
+    fontSize: 11.5,
+    color: habitPalette.food.ink,
+    marginBottom: 8,
   },
   emptyCard: {
     borderRadius: 22,
