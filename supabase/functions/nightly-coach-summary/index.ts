@@ -16,6 +16,79 @@ type LogRow = {
   freeze_used: boolean | null;
 };
 
+type Database = {
+  public: {
+    Tables: {
+      habits: {
+        Row: HabitRow & { is_archived: boolean | null };
+        Insert: Partial<HabitRow> & { user_id: string; name: string };
+        Update: Partial<HabitRow & { is_archived: boolean | null }>;
+        Relationships: [];
+      };
+      habit_logs: {
+        Row: LogRow & { user_id: string };
+        Insert: Partial<LogRow> & { user_id: string; habit_id: string };
+        Update: Partial<LogRow & { user_id: string }>;
+        Relationships: [];
+      };
+      coach_summaries: {
+        Row: {
+          user_id: string;
+          summary_window_start: string;
+          summary_window_end: string;
+          summary: ReturnType<typeof buildSummary>;
+        };
+        Insert: {
+          user_id: string;
+          summary_window_start: string;
+          summary_window_end: string;
+          summary: ReturnType<typeof buildSummary>;
+        };
+        Update: Partial<{
+          user_id: string;
+          summary_window_start: string;
+          summary_window_end: string;
+          summary: ReturnType<typeof buildSummary>;
+        }>;
+        Relationships: [];
+      };
+      coach_nudges: {
+        Row: {
+          user_id: string;
+          habit_id: string;
+          title: string;
+          body: string;
+          nudge_date: string;
+          scheduled_for: string;
+          deep_link_context: Record<string, unknown>;
+        };
+        Insert: {
+          user_id: string;
+          habit_id: string;
+          title: string;
+          body: string;
+          nudge_date: string;
+          scheduled_for: string;
+          deep_link_context: Record<string, unknown>;
+        };
+        Update: Partial<{
+          title: string;
+          body: string;
+          scheduled_for: string;
+          deep_link_context: Record<string, unknown>;
+        }>;
+        Relationships: [];
+      };
+    };
+    Views: Record<string, never>;
+    Functions: Record<string, never>;
+    Enums: Record<string, never>;
+    CompositeTypes: Record<string, never>;
+  };
+};
+
+type SupabaseAdminClient = ReturnType<typeof createClient<Database>>;
+
 const corsHeaders = {
   'access-control-allow-origin': '*',
   'access-control-allow-headers': 'authorization, x-client-info, apikey, content-type',
@@ -40,7 +113,7 @@ serve(async (req) => {
   const body = await req.json().catch(() => ({}));
   const end = dateToIso(new Date());
   const start = dateToIso(addDays(new Date(), -29));
-  const supabase = createClient(supabaseUrl, serviceRoleKey, {
+  const supabase = createClient<Database>(supabaseUrl, serviceRoleKey, {
     auth: { persistSession: false },
   });
 
@@ -95,7 +168,7 @@ serve(async (req) => {
 });
 
 async function getTargetUsers(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseAdminClient,
   requestedUserId: string | null,
 ) {
   if (requestedUserId) {
@@ -164,7 +237,7 @@ function buildSummary(habits: HabitRow[], logs: LogRow[], start: string, end: st
 }
 
 async function queueAtRiskNudges(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseAdminClient,
   userId: string,
   summary: ReturnType<typeof buildSummary>,
   today: string,

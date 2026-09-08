@@ -68,6 +68,7 @@ import {
   CalendarDays,
   Check,
   ChevronLeft,
+  ChevronRight,
   Clock3,
   Eye,
   EyeOff,
@@ -162,6 +163,7 @@ type CreateRitualInput = {
 
 type FloTone = 'gentle' | 'direct' | 'coach';
 type CheckinCategory = 'aligned_tradeoff' | 'circumstantial' | 'drift' | 'pattern';
+type AiReasonCategory = 'valid_reason' | 'avoidable_distraction' | 'unclear_reason';
 
 type FlowSettings = {
   pushNotifications: boolean;
@@ -187,7 +189,7 @@ type RitualCheckin = {
   actualResponseTime?: string;
   completionStatus?: 'completed_late' | 'not_completed' | 'completed_on_time';
   completedLate?: boolean;
-  aiReasonCategory?: 'valid_reason' | 'avoidable_distraction' | 'unclear_reason';
+  aiReasonCategory?: AiReasonCategory;
   aiReasonSummary?: string;
   aiAdvice?: string;
   resolvedAt?: number;
@@ -202,6 +204,7 @@ type SavedFlowState = {
   rhythmPoints: number;
   graceHearts: number;
   onboardingDream?: DreamId | null;
+  onboardingDreams?: DreamId[];
   tourCompleted?: boolean;
   settings: FlowSettings;
   insight: string;
@@ -222,7 +225,7 @@ type HeaderMetric = {
 };
 
 type TodayTourStep = {
-  id: 'goal' | 'streak' | 'points' | 'hearts';
+  id: 'goal' | 'streak' | 'points' | 'hearts' | 'activity';
   icon: string;
   title: string;
   body: string;
@@ -241,7 +244,7 @@ type BurstParticle = {
 
 type AuthMode = 'signIn' | 'createAccount' | 'forgot';
 type OnboardingStep = 'dream' | 'starters';
-type DreamId = 'maintain' | 'dedication' | 'calm' | 'strength' | 'mind' | 'rest';
+type DreamId = 'maintain' | 'dedication' | 'calm' | 'strength' | 'mind' | 'rest' | 'energy' | 'balance' | 'discipline';
 type PolicyKey = 'privacy' | 'terms' | 'cookies' | 'security' | 'accessibility';
 
 type AuthAccount = {
@@ -382,6 +385,7 @@ const TODAY_TOUR_SEEN_STORAGE_KEY = 'rituals-today-tour-seen-v1';
 const FIRST_RUN_TOUR_PENDING_STORAGE_KEY = 'rituals-first-run-tour-pending-v1';
 const REMINDER_NOTIFICATION_STORAGE_KEY = 'ritual-reminder-notifications-v1';
 const REMINDER_NOTIFICATION_CHANNEL_ID = 'ritual-reminders';
+const LATE_CHECKIN_DELAY_MINUTES = 60;
 const APP_SCHEME = 'com.pratikbhangale.rituals';
 const AUTH_CALLBACK_PATH = 'auth/callback';
 const DEFAULT_COUNTRY_CODE = '+91';
@@ -717,6 +721,9 @@ const dreamOptions: Array<{ id: DreamId; icon: string; title: string; descriptio
   { id: 'strength', icon: '💪', title: 'Get stronger', description: 'Move your body daily', paletteKey: 'gym' },
   { id: 'mind', icon: '📖', title: 'Grow my mind', description: 'Read, learn, focus', paletteKey: 'reading' },
   { id: 'rest', icon: '🌙', title: 'Rest better', description: 'Sleep as a ritual too', paletteKey: 'sleep' },
+  { id: 'energy', icon: '⚡', title: 'Boost energy', description: 'More movement, water, and sunlight', paletteKey: 'water' },
+  { id: 'balance', icon: '⚖️', title: 'Feel balanced', description: 'Steady routines without burnout', paletteKey: 'journal' },
+  { id: 'discipline', icon: '🎯', title: 'Build discipline', description: 'Focus blocks and fewer distractions', paletteKey: 'focus' },
 ];
 const starterRitualsByDream: Record<DreamId, Array<{ name: string; icon: string; paletteKey: PaletteKey; goalAmount?: number; goalUnit?: GoalUnit; reminderTime: string }>> = {
   maintain: [
@@ -749,6 +756,21 @@ const starterRitualsByDream: Record<DreamId, Array<{ name: string; icon: string;
     { name: 'No Screens After 9pm', icon: '📵', paletteKey: 'noPhone', reminderTime: '20:00' },
     { name: 'Wind-down Routine', icon: '🕯️', paletteKey: 'sleep', reminderTime: '20:00' },
   ],
+  energy: [
+    { name: 'Morning Water', icon: '💧', paletteKey: 'water', goalAmount: 2, goalUnit: 'glasses', reminderTime: '08:00' },
+    { name: 'Sunlight Walk', icon: '☀️', paletteKey: 'running', goalAmount: 10, goalUnit: 'minutes', reminderTime: '08:00' },
+    { name: 'Stretch Break', icon: '🤸', paletteKey: 'gym', goalAmount: 5, goalUnit: 'minutes', reminderTime: '13:00' },
+  ],
+  balance: [
+    { name: 'Daily Check-in', icon: '📝', paletteKey: 'journal', goalAmount: 5, goalUnit: 'minutes', reminderTime: '20:00' },
+    { name: 'Breathing Reset', icon: '🧘', paletteKey: 'meditate', goalAmount: 2, goalUnit: 'minutes', reminderTime: '13:00' },
+    { name: 'Tidy One Space', icon: '💼', paletteKey: 'work', goalAmount: 10, goalUnit: 'minutes', reminderTime: '20:00' },
+  ],
+  discipline: [
+    { name: 'No Phone Block', icon: '📵', paletteKey: 'noPhone', goalAmount: 30, goalUnit: 'minutes', reminderTime: '08:00' },
+    { name: 'Focus Sprint', icon: '🎯', paletteKey: 'focus', goalAmount: 25, goalUnit: 'minutes', reminderTime: '13:00' },
+    { name: 'Plan Tomorrow', icon: '📝', paletteKey: 'journal', goalAmount: 10, goalUnit: 'minutes', reminderTime: '20:00' },
+  ],
 };
 const extraStarterRitualsByDream: Record<DreamId, Array<{ name: string; icon: string; paletteKey: PaletteKey; goalAmount?: number; goalUnit?: GoalUnit; reminderTime: string }>> = {
   maintain: [
@@ -774,6 +796,18 @@ const extraStarterRitualsByDream: Record<DreamId, Array<{ name: string; icon: st
   rest: [
     { name: 'Bedtime Stretch', icon: '🤸', paletteKey: 'sleep', goalAmount: 8, goalUnit: 'minutes', reminderTime: '20:00' },
     { name: 'Wake Without Phone', icon: '🌅', paletteKey: 'noPhone', goalAmount: 20, goalUnit: 'minutes', reminderTime: '08:00' },
+  ],
+  energy: [
+    { name: 'Protein Meal', icon: '🥩', paletteKey: 'food', reminderTime: '13:00' },
+    { name: 'Music Reset', icon: '🎵', paletteKey: 'music', goalAmount: 5, goalUnit: 'minutes', reminderTime: '13:00' },
+  ],
+  balance: [
+    { name: 'Evening Walk', icon: '🚴', paletteKey: 'cycling', goalAmount: 15, goalUnit: 'minutes', reminderTime: '20:00' },
+    { name: 'Gratitude Note', icon: '✍️', paletteKey: 'journal', goalAmount: 3, goalUnit: 'minutes', reminderTime: '20:00' },
+  ],
+  discipline: [
+    { name: 'Deep Work Start', icon: '💻', paletteKey: 'work', goalAmount: 25, goalUnit: 'minutes', reminderTime: '08:00' },
+    { name: 'Cold Shower', icon: '🚿', paletteKey: 'water', reminderTime: '08:00' },
   ],
 };
 
@@ -817,6 +851,13 @@ const todayTourSteps: TodayTourStep[] = [
     body: 'Hearts protect your progress when you miss a day. They keep the routine forgiving.',
     color: colors.pink,
   },
+  {
+    id: 'activity',
+    icon: '✓',
+    title: 'Activity',
+    body: 'Activity is your daily habit log. Tap a ritual when it is done and the home page, streaks, and progress update together.',
+    color: colors.green,
+  },
 ];
 
 const seedSettings: FlowSettings = {
@@ -838,6 +879,7 @@ const defaultState: SavedFlowState = {
   rhythmPoints: 0,
   graceHearts: 5,
   onboardingDream: null,
+  onboardingDreams: [],
   tourCompleted: false,
   settings: seedSettings,
   insight: '',
@@ -1030,7 +1072,7 @@ async function syncWebRitualReminderNotifications({
 
   const next: ReminderScheduleRecord = {};
   for (const ritual of rituals) {
-    if (!isValidReminderTime(ritual.reminderTime)) {
+    if (ritual.doneToday || !isValidReminderTime(ritual.reminderTime)) {
       continue;
     }
     const body = ritualReminderBody(ritual.name, ritual.goalAmount, ritual.goalUnit);
@@ -1100,7 +1142,7 @@ async function syncRitualReminderNotifications({
 
   const next: ReminderScheduleRecord = {};
   for (const ritual of rituals) {
-    if (!isValidReminderTime(ritual.reminderTime)) {
+    if (ritual.doneToday || !isValidReminderTime(ritual.reminderTime)) {
       await cancelStored(stored[ritual.id]);
       continue;
     }
@@ -1115,7 +1157,7 @@ async function syncRitualReminderNotifications({
     const notificationId = await notifications.scheduleNotificationAsync({
       content: {
         title: `${ritual.name} is still pending`,
-        body: `Did you complete ${ritual.name}? Tap to tell Flo.`,
+        body: ritualReminderBody(ritual.name, ritual.goalAmount, ritual.goalUnit),
         sound: false,
         data: { ritualId: ritual.id, screen: 'coach', missedTask: true },
       },
@@ -1292,8 +1334,52 @@ function isCheckinCategory(value: unknown): value is CheckinCategory {
   return value === 'aligned_tradeoff' || value === 'circumstantial' || value === 'drift' || value === 'pattern';
 }
 
-function isAiReasonCategory(value: unknown): value is NonNullable<RitualCheckin['aiReasonCategory']> {
+function isAiReasonCategory(value: unknown): value is AiReasonCategory {
   return value === 'valid_reason' || value === 'avoidable_distraction' || value === 'unclear_reason';
+}
+
+function classifyReasonText(reason: string): { category: AiReasonCategory; keyword: string; summary: string } {
+  const lower = reason.trim().toLowerCase();
+  const has = (pattern: RegExp) => pattern.test(lower);
+  const forcedTravel = has(/\b(commute|traffic|train delay|bus delay|flight delay|work trip|business trip|office travel|travel for work)\b/i);
+  const leisureTravel = has(/\b(trip|outing|road trip|vacation|holiday|tour|hangout|hang out|club|clubbing|party|partying)\b/i);
+  const validMatch = [
+    { keyword: 'studying', pattern: /\b(study|studying|class|exam|assignment|lecture|college|school|homework|revision|practice)\b/i },
+    { keyword: 'work', pattern: /\b(work|office|job|shift|client|meeting|deadline|workload|project|overtime)\b/i },
+    { keyword: 'health', pattern: /\b(health|sick|ill|fever|doctor|hospital|medicine|injury|therapy)\b/i },
+    { keyword: 'family responsibility', pattern: /\b(family|parent|child|care|emergency|responsibility|urgent)\b/i },
+    { keyword: 'necessary travel', pattern: /\b(commute|traffic|train delay|bus delay|flight delay|work trip|business trip|office travel|travel for work)\b/i },
+  ].find(({ pattern }) => has(pattern));
+  const avoidableMatch = [
+    { keyword: 'party', pattern: /\b(party|partying|club|clubbing|bar|drinks?)\b/i },
+    { keyword: 'hangout', pattern: /\b(hangout|hang out|friends|date|chill|outing)\b/i },
+    { keyword: 'social media', pattern: /\b(scroll|instagram|reels?|youtube|shorts|social media|tiktok|facebook)\b/i },
+    { keyword: 'entertainment', pattern: /\b(movie|netflix|series|gaming|game|fun|entertainment|timepass)\b/i },
+    { keyword: 'leisure travel', pattern: /\b(trip|road trip|vacation|holiday|tour)\b/i },
+  ].find(({ pattern }) => has(pattern));
+  const vague = !lower || has(/\b(busy|forgot|no time|could not|couldn't|not able|later|something came up)\b/i);
+
+  if (avoidableMatch && (!validMatch || leisureTravel || !forcedTravel)) {
+    return {
+      category: 'avoidable_distraction',
+      keyword: avoidableMatch.keyword,
+      summary: `${avoidableMatch.keyword} replaced the planned ritual time.`,
+    };
+  }
+
+  if (validMatch && !vague) {
+    return {
+      category: 'valid_reason',
+      keyword: validMatch.keyword,
+      summary: `${validMatch.keyword} used the planned ritual window for a real responsibility.`,
+    };
+  }
+
+  return {
+    category: 'unclear_reason',
+    keyword: 'unclear blocker',
+    summary: 'The reason needs more detail before it can be judged fairly.',
+  };
 }
 
 function isGoalUnit(value: unknown): value is GoalUnit {
@@ -1306,6 +1392,16 @@ function isPaletteKey(value: unknown): value is PaletteKey {
 
 function isDreamId(value: unknown): value is DreamId {
   return typeof value === 'string' && dreamOptions.some((option) => option.id === value);
+}
+
+function normalizeDreamIds(value: unknown, fallback?: DreamId | null) {
+  const selected = Array.isArray(value)
+    ? value.filter(isDreamId)
+    : [];
+  if (selected.length) {
+    return Array.from(new Set(selected));
+  }
+  return fallback && isDreamId(fallback) ? [fallback] : [];
 }
 
 function iconOptionForKey(key: PaletteKey) {
@@ -1330,7 +1426,7 @@ function defaultGoalUnitForPalette(key: PaletteKey): GoalUnit {
 }
 
 function starterRitualToRitual(
-  starter: { name: string; icon: string; paletteKey: PaletteKey; goalAmount?: number; goalUnit?: GoalUnit; reminderTime: string },
+  starter: { name: string; icon: string; paletteKey: PaletteKey; goalAmount?: number; goalUnit?: GoalUnit; reminderTime?: string },
   index: number,
   idPrefix = 'starter',
 ): Ritual {
@@ -1422,6 +1518,15 @@ function timeValueFromDate(date: Date) {
   return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
 }
 
+function addMinutesToTime(value: string | undefined, minutes: number) {
+  if (!isValidReminderTime(value)) {
+    return '19:00';
+  }
+  const date = dateFromReminderTime(value);
+  date.setMinutes(date.getMinutes() + minutes);
+  return timeValueFromDate(date);
+}
+
 function dateFromReminderTime(value: string) {
   const [hourRaw, minuteRaw] = value.split(':');
   const date = new Date();
@@ -1447,7 +1552,7 @@ function nextReminderDate(value: string) {
 
 function nextLateReminderDate(value: string) {
   const date = dateFromReminderTime(value);
-  date.setHours(date.getHours() + 1);
+  date.setMinutes(date.getMinutes() + LATE_CHECKIN_DELAY_MINUTES);
   if (date.getTime() <= Date.now()) {
     date.setDate(date.getDate() + 1);
   }
@@ -1458,8 +1563,8 @@ function ritualReminderBody(name: string, goalAmount: number | undefined, goalUn
   const displayName = name.trim() || 'your ritual';
   const goal = goalLabel(goalAmount, goalUnit);
   return goal
-    ? `I want to finish this task today: ${goal}. Tap when ${displayName} is done.`
-    : `I want to finish this task today. Tap when ${displayName} is done.`;
+    ? `${displayName} is still open after its time window. Goal: ${goal}. Tap to tell Flo why or mark it done late.`
+    : `${displayName} is still open after its time window. Tap to tell Flo why or mark it done late.`;
 }
 
 function ritualReminderTitle(name: string) {
@@ -1473,7 +1578,7 @@ function ritualReminderExplanation(name: string, goalAmount: number | undefined,
     return 'Pick a reminder time if you want Rituals to nudge you when this ritual is still open.';
   }
   const body = ritualReminderBody(displayName, goalAmount, goalUnit);
-  return `If ${displayName} isn't marked done by ${formatReminderTime(reminderTime)}, Rituals will send a gentle nudge - "${body}"`;
+  return `If ${displayName} is not marked done within ${LATE_CHECKIN_DELAY_MINUTES} minutes after ${formatReminderTime(reminderTime)}, Rituals will ask why: "${body}"`;
 }
 
 function reminderWindowLabel(reminderTime?: string) {
@@ -1482,7 +1587,7 @@ function reminderWindowLabel(reminderTime?: string) {
   }
   const start = formatReminderTime(reminderTime);
   const endDate = dateFromReminderTime(reminderTime);
-  endDate.setHours(endDate.getHours() + 1);
+  endDate.setMinutes(endDate.getMinutes() + LATE_CHECKIN_DELAY_MINUTES);
   return `${start} - ${formatReminderTime(timeValueFromDate(endDate))}`;
 }
 
@@ -1491,7 +1596,7 @@ function reminderWindowClosed(ritual: Ritual, now = new Date()) {
     return false;
   }
   const close = dateFromReminderTime(ritual.reminderTime);
-  close.setHours(close.getHours() + 1);
+  close.setMinutes(close.getMinutes() + LATE_CHECKIN_DELAY_MINUTES);
   return now.getTime() > close.getTime();
 }
 
@@ -1509,28 +1614,25 @@ function recentPatternForReason(checkins: RitualCheckin[], reason: string, date 
 }
 
 function localFloCheckinReply(ritual: Ritual, reason: string, tone: FloTone, hasPattern: boolean) {
-  const lower = reason.toLowerCase();
-  const valid = /urgent|office|work|health|sick|ill|family|emergency|workload|responsibility|hospital|doctor|travel|traffic|meeting|deadline/i.test(lower);
-  const avoidable = /movie|party|social|scroll|instagram|youtube|gaming|game|timepass|entertainment|netflix|reel|fun/i.test(lower);
-  const unclear = !valid && !avoidable || /busy|forgot|could not|couldn't|not able|no time/i.test(lower);
-  const reasonCategory = avoidable ? 'avoidable_distraction' : valid && !unclear ? 'valid_reason' : 'unclear_reason';
+  const classified = classifyReasonText(reason);
+  const reasonCategory = classified.category;
   const category: CheckinCategory = hasPattern ? 'pattern' : reasonCategory === 'valid_reason' ? 'circumstantial' : 'drift';
   const protect = reasonCategory === 'valid_reason';
   const suggestedAction = reasonCategory === 'avoidable_distraction'
-    ? 'Finish first, entertainment after.'
+    ? `Do a 2-minute version of ${ritual.name} now, then keep entertainment after the ritual.`
     : reasonCategory === 'unclear_reason'
-      ? 'Name the exact blocker.'
-      : 'Reschedule or reduce target.';
+      ? 'Name the exact blocker, then choose a 30, 60, or 90-minute recovery slot.'
+      : `Protect the reason as ${classified.keyword}, then move ${ritual.name} to a 30, 60, or 90-minute recovery slot today.`;
   const advice = reasonCategory === 'valid_reason'
-    ? 'You can reschedule the ritual or reduce today\'s target so the habit still has a clean next step.'
+    ? `That looks valid because ${classified.keyword} used the time. Keep the streak honest: reduce the target or do it 30, 60, or 90 minutes later today.`
     : reasonCategory === 'avoidable_distraction'
-      ? 'Complete the ritual before entertainment, or block the distracting app until the ritual is done.'
-      : 'What was the exact blocker: time, energy, place, or another responsibility?';
+      ? `This looks avoidable because ${classified.keyword} replaced the ritual. Do the smallest version now, and move fun, scrolling, or social time after the ritual.`
+      : 'Tell me the exact blocker: time, energy, place, or another responsibility. Then I can suggest the right recovery slot.';
   const summary = reasonCategory === 'valid_reason'
-    ? 'The reason appears valid because an unavoidable responsibility or health issue replaced the planned ritual.'
+    ? classified.summary
     : reasonCategory === 'avoidable_distraction'
-      ? 'The reason appears avoidable because entertainment or drift replaced the planned ritual.'
-      : 'The reason is not specific enough to identify the real blocker.';
+      ? classified.summary
+      : classified.summary;
   return {
     message: reasonCategory === 'valid_reason'
       ? `I understand. I saved this as a valid reason. ${advice}`
@@ -1648,7 +1750,8 @@ function normalizeState(parsed: Partial<SavedFlowState> = {}): SavedFlowState {
     rhythmPoints: typeof parsed.rhythmPoints === 'number' && Number.isFinite(parsed.rhythmPoints) ? Math.max(0, parsed.rhythmPoints) : 0,
     graceHearts: nextGraceHearts,
     onboardingDream: isDreamId(parsed.onboardingDream) ? parsed.onboardingDream : null,
-    tourCompleted: typeof parsed.tourCompleted === 'boolean' ? parsed.tourCompleted : Boolean(parsed.onboardingDream),
+    onboardingDreams: normalizeDreamIds(parsed.onboardingDreams, isDreamId(parsed.onboardingDream) ? parsed.onboardingDream : null),
+    tourCompleted: typeof parsed.tourCompleted === 'boolean' ? parsed.tourCompleted : Boolean(parsed.onboardingDream || parsed.onboardingDreams?.length),
     settings: normalizeSettings(parsed.settings),
     insight: parsed.insight ?? '',
     stateDate: today,
@@ -2069,6 +2172,50 @@ function shiftBinarySeries(values: number[], distance: number) {
     return Array.from({ length: values.length }, () => 0);
   }
   return [...values.slice(distance), ...Array.from({ length: distance }, () => 0)];
+}
+
+function fixedBinarySeries(values: number[] | undefined, length = 30) {
+  const source = Array.isArray(values) ? values : [];
+  const clean = source.slice(-length).map((value) => (value ? 1 : 0));
+  return [...Array.from({ length: Math.max(0, length - clean.length) }, () => 0), ...clean];
+}
+
+function monthNameYearLabel(date: Date) {
+  return date.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+}
+
+function progressMonthModel(heat: number[], monthDate = new Date()) {
+  const monthStart = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
+  const monthEnd = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0);
+  const today = new Date(monthDate);
+  today.setHours(0, 0, 0, 0);
+  const heatDays = isoDaysBack(heat.length, todayIso(today));
+  const heatByIso = new Map(heatDays.map((iso, index) => [iso, heat[index] ?? 0]));
+  const cells: Array<{ key: string; day: number | null; status: 'blank' | 'missed' | 'partial' | 'done'; isToday: boolean }> = [];
+
+  for (let index = 0; index < monthStart.getDay(); index += 1) {
+    cells.push({ key: `blank-${index}`, day: null, status: 'blank', isToday: false });
+  }
+
+  for (let day = 1; day <= monthEnd.getDate(); day += 1) {
+    const date = new Date(monthStart.getFullYear(), monthStart.getMonth(), day);
+    const iso = todayIso(date);
+    const heatValue = heatByIso.get(iso) ?? 0;
+    const status = heatValue >= 1 ? 'done' : heatValue > 0 ? 'partial' : 'missed';
+    cells.push({ key: iso, day, status, isToday: iso === todayIso(today) });
+  }
+
+  const doneDays = cells.filter((cell) => cell.status === 'done').length;
+  const trackedDays = cells.filter((cell) => cell.day !== null && new Date(monthStart.getFullYear(), monthStart.getMonth(), cell.day).getTime() <= today.getTime()).length;
+  const completion = trackedDays ? Math.round((doneDays / trackedDays) * 100) : 0;
+
+  return {
+    label: monthNameYearLabel(monthStart),
+    cells,
+    doneDays,
+    trackedDays,
+    completion,
+  };
 }
 
 function paletteToDbColor(paletteKey: PaletteKey) {
@@ -2620,7 +2767,7 @@ function AuthenticatedApp() {
       userId={account.id}
       initialMissedRitualId={notificationRitualId}
       initialTab={flowInitialTab}
-      username={account.username}
+      username={account.name?.trim() || account.username}
       email={account.email}
       habitFocus={account.habitFocus}
       profileIncomplete={account.profileComplete === false}
@@ -2925,7 +3072,6 @@ function AuthGate({
         ));
         return;
       }
-      await clearFirstRunTourPending(undefined, resendEmail);
       setPendingConfirmationEmail(resendEmail);
       setMessage('Confirmation email sent again. Open the email, confirm, then sign in.');
     } catch (authError) {
@@ -3307,8 +3453,8 @@ function OnboardingDreamFlow({
   reduceMotion: boolean;
   onSkip: () => void;
   onComplete: (
-    dream: DreamId,
-    starters: Array<{ name: string; icon: string; paletteKey: PaletteKey; goalAmount?: number; goalUnit?: GoalUnit; reminderTime: string }>,
+    dreams: DreamId[],
+    starters: Array<{ name: string; icon: string; paletteKey: PaletteKey; goalAmount?: number; goalUnit?: GoalUnit; reminderTime?: string }>,
   ) => void | Promise<void>;
 }) {
   const insets = useSafeAreaInsets();
@@ -3317,6 +3463,7 @@ function OnboardingDreamFlow({
   const [step, setStep] = useState<OnboardingStep>('dream');
   const [selectedDreams, setSelectedDreams] = useState<DreamId[]>([]);
   const [enabled, setEnabled] = useState<Record<string, boolean>>({});
+  const [starterTimes, setStarterTimes] = useState<Record<string, string | undefined>>({});
   const [submitting, setSubmitting] = useState(false);
   const starters = selectedDreams.flatMap((dream) =>
     starterOptionsForDream(dream).map((starter) => ({
@@ -3325,7 +3472,13 @@ function OnboardingDreamFlow({
       starterKey: `${dream}:${starter.name}`,
     })),
   );
-  const selectedStarters = starters.filter((starter) => enabled[starter.starterKey] === true).slice(0, 5);
+  const selectedStarters = starters
+    .filter((starter) => enabled[starter.starterKey] === true)
+    .slice(0, 5)
+    .map((starter) => ({
+      ...starter,
+      reminderTime: starter.starterKey in starterTimes ? starterTimes[starter.starterKey] : starter.reminderTime,
+    }));
   const stepIndex = step === 'dream' ? 0 : 1;
   const title = step === 'dream'
     ? "What's your ritual dream?"
@@ -3382,7 +3535,7 @@ function OnboardingDreamFlow({
     }
     try {
       setSubmitting(true);
-      await onComplete(selectedDreams[0], selectedStarters);
+      await onComplete(selectedDreams, selectedStarters);
     } finally {
       setSubmitting(false);
     }
@@ -3406,6 +3559,10 @@ function OnboardingDreamFlow({
       }
       return { ...current, [starterKey]: !checked };
     });
+  };
+
+  const setStarterReminderTime = (starterKey: string, reminderTime?: string) => {
+    setStarterTimes((current) => ({ ...current, [starterKey]: reminderTime }));
   };
 
   return (
@@ -3472,6 +3629,7 @@ function OnboardingDreamFlow({
                       onPress={() => toggleDream(option.id)}
                       style={[
                         styles.dreamCard,
+                        selected && styles.dreamCardSelected,
                         selected && {
                           borderColor: colors.blue1,
                           shadowColor: colors.blue1,
@@ -3529,19 +3687,20 @@ function OnboardingDreamFlow({
                 {starters.map((starter) => {
                   const checked = enabled[starter.starterKey] === true;
                   const palette = habitPalette[starter.paletteKey];
+                  const starterTime = starter.starterKey in starterTimes ? starterTimes[starter.starterKey] : starter.reminderTime;
                   const detail = [
                     dreamTitleForId(starter.dream),
                     goalLabel(starter.goalAmount, starter.goalUnit),
-                    formatReminderTime(starter.reminderTime),
+                    starterTime ? formatReminderTime(starterTime) : 'No reminder',
                   ].filter(Boolean).join(' · ');
                   return (
-                    <Pressable
-                      key={starter.starterKey}
-                      accessibilityRole="switch"
-                      accessibilityState={{ checked }}
-                      onPress={() => toggleStarter(starter.starterKey, checked)}
-                      style={styles.starterRow}
-                    >
+                    <View key={starter.starterKey} style={[styles.starterRow, checked && styles.starterRowSelected]}>
+                      <Pressable
+                        accessibilityRole="switch"
+                        accessibilityState={{ checked }}
+                        onPress={() => toggleStarter(starter.starterKey, checked)}
+                        style={styles.starterMain}
+                      >
                       <View style={[styles.starterIcon, { backgroundColor: palette.bg[0] }]}>
                         <Text style={styles.starterIconText}>{starter.icon}</Text>
                       </View>
@@ -3552,7 +3711,28 @@ function OnboardingDreamFlow({
                       <View style={[styles.amountSwitch, checked && styles.amountSwitchOn]}>
                         <View style={[styles.amountSwitchKnob, checked && styles.amountSwitchKnobOn]} />
                       </View>
-                    </Pressable>
+                      </Pressable>
+                      {checked ? (
+                        <View style={styles.starterTimeRow}>
+                          {reminderPresets.map((preset) => {
+                            const selectedTime = starterTime === preset.value;
+                            return (
+                              <Pressable
+                                key={`${starter.starterKey}-${preset.label}`}
+                                accessibilityRole="button"
+                                accessibilityState={{ selected: selectedTime }}
+                                onPress={() => setStarterReminderTime(starter.starterKey, preset.value)}
+                                style={[styles.starterTimeChip, selectedTime && styles.starterTimeChipSelected]}
+                              >
+                                <Text style={[styles.starterTimeChipText, selectedTime && styles.starterTimeChipTextSelected]}>
+                                  {preset.label}
+                                </Text>
+                              </Pressable>
+                            );
+                          })}
+                        </View>
+                      ) : null}
+                    </View>
                   );
                 })}
               </View>
@@ -4449,6 +4629,7 @@ function FlowApp({
   const [rhythmPoints, setRhythmPoints] = useState(defaultState.rhythmPoints);
   const [graceHearts, setGraceHearts] = useState(defaultState.graceHearts);
   const [onboardingDream, setOnboardingDream] = useState<DreamId | null>(defaultState.onboardingDream ?? null);
+  const [onboardingDreams, setOnboardingDreams] = useState<DreamId[]>(defaultState.onboardingDreams ?? []);
   const [tourCompleted, setTourCompleted] = useState(Boolean(defaultState.tourCompleted));
   const [tourStepIndex, setTourStepIndex] = useState(0);
   const [settings, setSettings] = useState(defaultState.settings);
@@ -4484,6 +4665,7 @@ function FlowApp({
 
   useEffect(() => {
     if (hydrated && initialMissedRitualId) {
+      setSelectedRitualId(initialMissedRitualId);
       setCoachOpen(true);
     }
   }, [hydrated, initialMissedRitualId]);
@@ -4502,6 +4684,7 @@ function FlowApp({
       setRhythmPoints(state.rhythmPoints);
       setGraceHearts(state.graceHearts);
       setOnboardingDream(state.onboardingDream ?? null);
+      setOnboardingDreams(state.onboardingDreams ?? []);
       setTourCompleted(hasCompletedTour);
       setTodayTourSeen(hasCompletedTour || !firstRunTourPending);
       setTourStepIndex(0);
@@ -4589,13 +4772,14 @@ function FlowApp({
       rhythmPoints,
       graceHearts,
       onboardingDream,
+      onboardingDreams,
       tourCompleted,
       settings,
       insight,
       stateDate,
     };
     AsyncStorage.setItem(storageKey, JSON.stringify(state)).catch(() => undefined);
-  }, [baseDoneFromOtherHabits, checkins, graceHearts, hydrated, insight, onboardingDream, overallStreak, rhythmPoints, rituals, settings, stateDate, storageKey, totalActiveRituals, tourCompleted]);
+  }, [baseDoneFromOtherHabits, checkins, graceHearts, hydrated, insight, onboardingDream, onboardingDreams, overallStreak, rhythmPoints, rituals, settings, stateDate, storageKey, totalActiveRituals, tourCompleted]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -4615,6 +4799,7 @@ function FlowApp({
         rhythmPoints,
         graceHearts,
         onboardingDream,
+        onboardingDreams,
         tourCompleted,
         settings,
         insight,
@@ -4628,6 +4813,7 @@ function FlowApp({
       setRhythmPoints(next.rhythmPoints);
       setGraceHearts(next.graceHearts);
       setOnboardingDream(next.onboardingDream ?? null);
+      setOnboardingDreams(next.onboardingDreams ?? []);
       setTourCompleted(Boolean(next.tourCompleted));
       setSettings(next.settings);
       setInsight(next.insight);
@@ -4645,7 +4831,7 @@ function FlowApp({
       clearInterval(timer);
       subscription.remove();
     };
-  }, [baseDoneFromOtherHabits, checkins, graceHearts, hydrated, insight, onboardingDream, overallStreak, rhythmPoints, rituals, settings, stateDate, totalActiveRituals, tourCompleted]);
+  }, [baseDoneFromOtherHabits, checkins, graceHearts, hydrated, insight, onboardingDream, onboardingDreams, overallStreak, rhythmPoints, rituals, settings, stateDate, totalActiveRituals, tourCompleted]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -4671,8 +4857,10 @@ function FlowApp({
     [checkins],
   );
   const pendingCheckinRituals = useMemo(
-    () => rituals.filter((ritual) => reminderWindowClosed(ritual) && !todayCheckinIds.has(ritual.id)),
-    [rituals, todayCheckinIds],
+    () => rituals
+      .filter((ritual) => reminderWindowClosed(ritual) && !todayCheckinIds.has(ritual.id))
+      .sort((a, b) => (a.id === selectedRitualId ? -1 : b.id === selectedRitualId ? 1 : 0)),
+    [rituals, selectedRitualId, todayCheckinIds],
   );
   const weeklyPatternCheckin = useMemo(() => {
     const start = new Date(`${todayIso()}T00:00:00`);
@@ -4803,15 +4991,17 @@ function FlowApp({
   }, [checkins, impact, pendingCheckinRituals, persistCheckinsRemote, settings.floTone, showToast]);
 
   const completeOnboarding = async (
-    dream: DreamId,
-    selectedStarters: Array<{ name: string; icon: string; paletteKey: PaletteKey; goalAmount?: number; goalUnit?: GoalUnit; reminderTime: string }>,
+    dreams: DreamId[],
+    selectedStarters: Array<{ name: string; icon: string; paletteKey: PaletteKey; goalAmount?: number; goalUnit?: GoalUnit; reminderTime?: string }>,
   ) => {
-    if (!selectedStarters.length) {
+    if (!dreams.length || !selectedStarters.length) {
       showToast('Choose at least one starter ritual');
       return;
     }
 
-    let nextRituals = selectedStarters.map((starter, index) => starterRitualToRitual(starter, index, `starter-${dream}`));
+    const primaryDream = dreams[0] ?? 'maintain';
+    const dreamKey = dreams.join('-');
+    let nextRituals = selectedStarters.map((starter, index) => starterRitualToRitual(starter, index, `starter-${dreamKey}`));
 
     if (supabase && canUseRemote && userId) {
       const { data, error: insertError } = await supabase
@@ -4847,7 +5037,8 @@ function FlowApp({
       }
     }
 
-    setOnboardingDream(dream);
+    setOnboardingDream(primaryDream);
+    setOnboardingDreams(dreams);
     setStarterOnboardingAllowed(false);
     setRituals(nextRituals);
     setTotalActiveRituals(nextRituals.length);
@@ -4863,6 +5054,7 @@ function FlowApp({
 
   const skipStarterOnboarding = () => {
     setOnboardingDream('maintain');
+    setOnboardingDreams(['maintain']);
     setStarterOnboardingAllowed(false);
     setActiveTab('today');
     showToast('You can add rituals anytime');
@@ -5278,12 +5470,12 @@ function FlowApp({
     );
   }
 
-  if (starterOnboardingAllowed && !onboardingDream && rituals.length === 0) {
+  if (starterOnboardingAllowed && !onboardingDreams.length && rituals.length === 0) {
     return (
       <OnboardingDreamFlow
         reduceMotion={reduceMotion}
         onSkip={skipStarterOnboarding}
-        onComplete={(dream, starters) => completeOnboarding(dream, starters).catch(() => undefined)}
+        onComplete={(dreams, starters) => completeOnboarding(dreams, starters).catch(() => undefined)}
       />
     );
   }
@@ -5303,7 +5495,7 @@ function FlowApp({
             screenStyle,
           ]}
         >
-          {activeTab === 'today' && !showTodayTour ? (
+          {activeTab === 'today' ? (
             <TodayScreen
               username={username}
               rituals={rituals}
@@ -5373,6 +5565,22 @@ function FlowApp({
           onSubmitCheckin={submitCheckin}
           onCompleteLate={completeLateRitual}
           onAddRitual={(name, icon) => addRitual({ name, icon, paletteKey: iconOptionForEmoji(icon).key })}
+          onRescheduleRitual={(ritualId, reminderTime) => {
+            const ritual = rituals.find((item) => item.id === ritualId);
+            if (!ritual) {
+              showToast('Ritual not found');
+              return;
+            }
+            updateRitual(ritualId, {
+              name: ritual.name,
+              icon: ritual.icon,
+              paletteKey: ritual.paletteKey,
+              why: ritual.why,
+              goalAmount: ritual.goalAmount,
+              goalUnit: ritual.goalUnit,
+              reminderTime,
+            }).catch(() => undefined);
+          }}
         />
         <AddRitualSheet
           open={addOpen || Boolean(editingRitual)}
@@ -5399,6 +5607,13 @@ function FlowApp({
           totalSteps={todayTourSteps.length}
           topInset={insets.top}
           bottomInset={insets.bottom}
+          values={{
+            goal: `${heroPercent}%`,
+            streak: String(overallStreak),
+            points: String(rhythmPoints),
+            hearts: String(graceHearts),
+            activity: `${doneCount}/${totalActiveRituals}`,
+          }}
           onNext={nextTodayTourStep}
           onSkip={finishTodayTour}
         />
@@ -6163,7 +6378,7 @@ function FloCheckinCard({
   const [customReason, setCustomReason] = useState('');
   const latestToday = latestCheckins.find((checkin) => checkin.date === todayIso());
   const activeRitual = rituals[0];
-  const quickReplies = ['Something came up', 'Chose something else', "Just didn't get to it"];
+  const quickReplies = ['I was studying', 'Office work ran late', 'Party or hangout', 'Social scrolling'];
 
   if (!rituals.length && !latestToday) {
     return null;
@@ -6200,7 +6415,7 @@ function FloCheckinCard({
 
       {rituals.length ? (
         <>
-          <Text style={styles.floQuestion}>{activeRitual?.name} was not marked complete. Did you complete it?</Text>
+          <Text style={styles.floQuestion}>{activeRitual?.name} was not marked complete after its reminder window. Did you complete it late?</Text>
           <View style={styles.floChipRow}>
             <Pressable accessibilityRole="button" onPress={() => activeRitual && onCompleteLate(activeRitual)} style={styles.floReplyChip}>
               <Text style={styles.floReplyText}>Yes, I completed it</Text>
@@ -6209,7 +6424,7 @@ function FloCheckinCard({
               <Text style={styles.floReplyText}>No, I did not</Text>
             </Pressable>
           </View>
-          <Text style={styles.floQuestion}>What came up?</Text>
+          <Text style={styles.floQuestion}>Why was it delayed?</Text>
           <View style={styles.floChipRow}>
             {quickReplies.map((reply) => (
               <Pressable key={reply} accessibilityRole="button" onPress={() => onSubmit(reply, activeRitual?.id)} style={styles.floReplyChip}>
@@ -6619,7 +6834,8 @@ function ProgressScreen({
   reduceMotion: boolean;
   onSelectRitual: (id: string) => void;
 }) {
-  const [range, setRange] = useState<'week' | 'month'>('week');
+  const [range, setRange] = useState<'week' | 'month'>('month');
+  const now = useMinuteNow();
   if (!selectedRitual) {
     return (
       <ScrollView contentContainerStyle={styles.screenScroll} showsVerticalScrollIndicator={false}>
@@ -6630,16 +6846,21 @@ function ProgressScreen({
   }
 
   const palette = habitPalette[selectedRitual.paletteKey];
-  const selectedWeekHistory = selectedRitual.heat.slice(-7);
-  const selectedCurrentStreak = currentStreakFromHeat(selectedRitual.heat);
-  const selectedBestStreak = longestStreakFromHeat(selectedRitual.heat);
+  const selectedMonthHistory = fixedBinarySeries(selectedRitual.heat);
+  const selectedWeekHistory = selectedMonthHistory.slice(-7);
+  const monthModel = progressMonthModel(selectedMonthHistory, now);
+  const selectedCurrentStreak = currentStreakFromHeat(selectedMonthHistory);
+  const selectedBestStreak = longestStreakFromHeat(selectedMonthHistory);
   const weekPercent = percentFromWeekly(selectedWeekHistory);
-  const monthPercent = selectedRitual.heat.length
-    ? Math.round((selectedRitual.heat.reduce((sum, value) => sum + (value ? 1 : 0), 0) / selectedRitual.heat.length) * 100)
+  const monthPercent = selectedMonthHistory.length
+    ? Math.round((selectedMonthHistory.reduce((sum, value) => sum + (value ? 1 : 0), 0) / selectedMonthHistory.length) * 100)
     : 0;
   const rangePercent = range === 'week' ? weekPercent : monthPercent;
   const combinedHeat = combinedHeatFromRituals(rituals);
   const activeCount = Math.max(1, totalActiveRituals || rituals.length);
+  const activeHeatDays = combinedHeat.filter((value) => value > 0).length;
+  const perfectHeatDays = combinedHeat.filter((value) => value >= activeCount).length;
+  const heatCompletionPercent = Math.round((combinedHeat.reduce((sum, value) => sum + value, 0) / (activeCount * combinedHeat.length)) * 100);
 
   return (
     <ScrollView contentContainerStyle={styles.screenScroll} showsVerticalScrollIndicator={false}>
@@ -6684,7 +6905,7 @@ function ProgressScreen({
               accessibilityRole="button"
               accessibilityState={{ selected: range === option }}
               onPress={() => setRange(option)}
-              style={[styles.rangeToggleOption, range === option && { backgroundColor: palette.a }]}
+              style={[styles.rangeToggleOption, range === option && { backgroundColor: colors.blue1 }]}
             >
               <Text style={[styles.rangeToggleText, range === option && styles.rangeToggleTextActive]}>
                 {option === 'week' ? 'This Week' : 'This Month'}
@@ -6692,7 +6913,7 @@ function ProgressScreen({
             </Pressable>
           ))}
         </View>
-        <Text style={styles.weekSub}>{range === 'week' ? "This week's completions" : 'Last 30 days by date'}</Text>
+        <Text style={styles.weekSub}>{range === 'week' ? "This week's completions" : 'Current month progress'}</Text>
         {range === 'week' ? (
           <View style={styles.bars}>
             {selectedWeekHistory.map((done, index) => (
@@ -6709,24 +6930,83 @@ function ProgressScreen({
             ))}
           </View>
         ) : (
-          <View style={styles.monthGrid}>
-            {selectedRitual.heat.map((done, index) => (
-              <HeatCell
-                key={`${selectedRitual.id}-month-${index}`}
-                intensity={done ? 1 : 0}
-                newest={index === selectedRitual.heat.length - 1}
-                palette={palette}
-                delay={index * 14}
-                reduceMotion={reduceMotion}
-                trigger={`${selectedRitual.id}-${range}`}
-              />
-            ))}
+          <View style={styles.progressCalendar}>
+            <View style={styles.progressCalendarHead}>
+              <Text style={styles.progressCalendarTitle}>{monthModel.label}</Text>
+              <View style={styles.progressCalendarNav}>
+                <View style={styles.progressCalendarNavButton}>
+                  <ChevronLeft size={15} color={colors.inkSoft} strokeWidth={2.5} />
+                </View>
+                <View style={styles.progressCalendarNavButton}>
+                  <ChevronRight size={15} color={colors.inkSoft} strokeWidth={2.5} />
+                </View>
+              </View>
+            </View>
+            <View style={styles.progressWeekdays}>
+              {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((day, index) => (
+                <Text key={`${day}-${index}`} style={styles.progressWeekday}>{day}</Text>
+              ))}
+            </View>
+            <View style={styles.progressMonthGrid}>
+              {monthModel.cells.map((cell) => (
+                <View
+                  key={cell.key}
+                  style={[
+                    styles.progressDayCell,
+                    cell.status === 'blank' && styles.progressDayBlank,
+                    cell.status === 'missed' && styles.progressDayMissed,
+                    cell.status === 'partial' && styles.progressDayPartial,
+                    cell.status === 'done' && styles.progressDayDone,
+                    cell.isToday && styles.progressDayToday,
+                  ]}
+                >
+                  {cell.day ? (
+                    <Text style={[styles.progressDayText, cell.status === 'done' && styles.progressDayTextDone]}>
+                      {cell.day}
+                    </Text>
+                  ) : null}
+                </View>
+              ))}
+            </View>
+            <View style={styles.progressLegend}>
+              <View style={styles.progressLegendItem}>
+                <View style={[styles.progressLegendDot, styles.progressLegendMissed]} />
+                <Text style={styles.progressLegendText}>Missed</Text>
+              </View>
+              <View style={styles.progressLegendItem}>
+                <View style={[styles.progressLegendDot, styles.progressLegendPartial]} />
+                <Text style={styles.progressLegendText}>Partial</Text>
+              </View>
+              <View style={styles.progressLegendItem}>
+                <View style={[styles.progressLegendDot, styles.progressLegendDone]} />
+                <Text style={styles.progressLegendText}>Done</Text>
+              </View>
+            </View>
+            <View style={styles.progressMonthStats}>
+              <View style={styles.progressMonthStat}>
+                <Text style={styles.progressMonthStatValue}>{monthModel.doneDays}</Text>
+                <Text style={styles.progressMonthStatLabel}>days done</Text>
+              </View>
+              <View style={styles.progressMonthStat}>
+                <Text style={styles.progressMonthStatValue}>{monthModel.trackedDays}</Text>
+                <Text style={styles.progressMonthStatLabel}>days logged</Text>
+              </View>
+              <View style={styles.progressMonthStat}>
+                <Text style={styles.progressMonthStatValue}>{monthModel.completion}%</Text>
+                <Text style={styles.progressMonthStatLabel}>completion</Text>
+              </View>
+            </View>
           </View>
         )}
       </GradientCard>
 
       <GradientCard style={styles.heatCard}>
-        <Text style={styles.weekTitle}>Completion heat</Text>
+        <View style={styles.weekHead}>
+          <Text style={styles.weekTitle}>Completion heat</Text>
+          <View style={styles.pillPct}>
+            <Text style={styles.pillPctText}>{heatCompletionPercent}%</Text>
+          </View>
+        </View>
         <View style={styles.heatGrid}>
           {combinedHeat.map((done, index) => (
             <HeatCell
@@ -6740,7 +7020,21 @@ function ProgressScreen({
             />
           ))}
         </View>
-        <Text style={styles.heatNote}>Compared against {totalActiveRituals} active rituals.</Text>
+        <View style={styles.heatSummaryRow}>
+          <View style={styles.heatSummaryItem}>
+            <Text style={styles.heatSummaryValue}>{activeHeatDays}</Text>
+            <Text style={styles.heatSummaryLabel}>active days</Text>
+          </View>
+          <View style={styles.heatSummaryItem}>
+            <Text style={styles.heatSummaryValue}>{perfectHeatDays}</Text>
+            <Text style={styles.heatSummaryLabel}>perfect days</Text>
+          </View>
+          <View style={styles.heatSummaryItem}>
+            <Text style={styles.heatSummaryValue}>{activeCount}</Text>
+            <Text style={styles.heatSummaryLabel}>rituals</Text>
+          </View>
+        </View>
+        <Text style={styles.heatNote}>Darker boxes mean more rituals completed on that day.</Text>
       </GradientCard>
 
       <View style={styles.sectionHead}>
@@ -6765,7 +7059,7 @@ function ProgressScreen({
   );
 }
 
-async function requestCoachReply(message: string, history: CoachMessage[], rituals: Ritual[]) {
+async function requestCoachReply(message: string, history: CoachMessage[], rituals: Ritual[], checkins: RitualCheckin[] = []) {
   if (supabase) {
     try {
       const { data, error } = await supabase.functions.invoke('coach-chat', {
@@ -6781,7 +7075,7 @@ async function requestCoachReply(message: string, history: CoachMessage[], ritua
       // Fall back to local, real in-memory ritual data when the network or function is unavailable.
     }
   }
-  return buildLocalCoachReply(message, rituals);
+  return buildLocalCoachReply(message, rituals, checkins);
 }
 
 type ReportExportSource = {
@@ -6811,6 +7105,8 @@ async function generateAndShareReport(intervalDays: FlowSettings['reportInterval
   const window = report.window as { start?: string; end?: string; intervalDays?: number } | undefined;
   const selectedDays = Number(window?.intervalDays ?? intervalDays);
   const list = (value: unknown) => Array.isArray(value) && value.length ? value.map((item) => escapeHtml(String(item))).join(', ') : 'None recorded';
+  const productiveKeywords = list(report.productiveTimeKeywords);
+  const avoidableKeywords = list(report.avoidableTimeKeywords);
   const rangeLabel = `${formatReportDate(window?.start)} to ${formatReportDate(window?.end)} (includes today)`;
   const generatedLabel = formatReportDateTime(new Date());
   const html = `<!DOCTYPE html>
@@ -6843,11 +7139,13 @@ async function generateAndShareReport(intervalDays: FlowSettings['reportInterval
       <h2>Where time is slipping</h2>
       <p><strong>Most missed category:</strong> ${escapeHtml(String(report.mostMissedTaskCategory ?? 'None recorded'))}<br/>
       <strong>Avoidable distractions:</strong> ${list(report.commonAvoidableDistractions)}<br/>
+      <strong>Avoidable time leak:</strong> ${avoidableKeywords}<br/>
       <strong>Pattern:</strong> ${escapeHtml(String(report.timeWastingPattern ?? 'No pattern recorded'))}</p>
     </div>
     <div class="section">
       <h2>What is working</h2>
       <p><strong>Valid reasons:</strong> ${list(report.commonValidReasons)}<br/>
+      <strong>Productive protected time:</strong> ${productiveKeywords}<br/>
       <strong>Best days:</strong> ${list(report.bestPerformingDays)}<br/>
       <strong>Weak areas:</strong> ${list(report.weakAreas)}</p>
     </div>
@@ -6905,6 +7203,8 @@ function buildLocalBehaviorReport(intervalDays: FlowSettings['reportIntervalDays
   const missedByCategory = new Map<string, number>();
   const validReasons = new Map<string, number>();
   const avoidableReasons = new Map<string, number>();
+  const productiveKeywords = new Map<string, number>();
+  const avoidableKeywords = new Map<string, number>();
 
   checkins.forEach((checkin) => {
     if (checkin.taskCategory) {
@@ -6915,11 +7215,15 @@ function buildLocalBehaviorReport(intervalDays: FlowSettings['reportIntervalDays
     if (!reason) {
       return;
     }
-    if (checkin.aiReasonCategory === 'valid_reason') {
+    const classified = classifyReasonText(reason);
+    const reasonCategory = checkin.aiReasonCategory ?? classified.category;
+    if (reasonCategory === 'valid_reason') {
       validReasons.set(reason, (validReasons.get(reason) ?? 0) + 1);
+      productiveKeywords.set(classified.keyword, (productiveKeywords.get(classified.keyword) ?? 0) + 1);
     }
-    if (checkin.aiReasonCategory === 'avoidable_distraction') {
+    if (reasonCategory === 'avoidable_distraction') {
       avoidableReasons.set(reason, (avoidableReasons.get(reason) ?? 0) + 1);
+      avoidableKeywords.set(classified.keyword, (avoidableKeywords.get(classified.keyword) ?? 0) + 1);
     }
   });
 
@@ -6940,6 +7244,8 @@ function buildLocalBehaviorReport(intervalDays: FlowSettings['reportIntervalDays
   const weakAreas = topReportKeys(missedByCategory);
   const avoidable = topReportKeys(avoidableReasons);
   const valid = topReportKeys(validReasons);
+  const productiveTimeKeywords = topReportKeys(productiveKeywords);
+  const avoidableTimeKeywords = topReportKeys(avoidableKeywords);
 
   return {
     window: { start, end, intervalDays },
@@ -6950,14 +7256,18 @@ function buildLocalBehaviorReport(intervalDays: FlowSettings['reportIntervalDays
     mostMissedTaskCategory: weakAreas[0] ?? null,
     commonValidReasons: valid,
     commonAvoidableDistractions: avoidable,
+    productiveTimeKeywords,
+    avoidableTimeKeywords,
     timeWastingPattern: avoidable.length
-      ? `Avoidable time went mostly into: ${avoidable.join(', ')}.`
+      ? `Avoidable time went mostly into ${avoidableTimeKeywords.length ? avoidableTimeKeywords.join(', ') : avoidable.join(', ')} instead of the planned ritual.`
       : 'No repeated avoidable-distraction pattern is recorded for this period.',
     bestPerformingDays: topReportKeys(completedByDay),
     weakAreas,
     advice: avoidable.length
-      ? 'Finish the smallest version of the missed ritual before entertainment, then use entertainment as the reward.'
-      : 'Keep tracking the real reason when a ritual slips; the report becomes sharper with each honest check-in.',
+      ? 'When the reason is party, hangout, clubbing, scrolling, or entertainment, finish a 2-minute version first and use the fun activity only as the reward.'
+      : productiveTimeKeywords.length
+        ? `Your protected time is mostly going into ${productiveTimeKeywords.join(', ')}. Keep it, then recover the ritual with a 30, 60, or 90-minute slot.`
+        : 'Keep tracking the real reason when a ritual slips; the report becomes sharper with each honest check-in.',
   };
 }
 
@@ -6975,7 +7285,7 @@ function formatReportDayLabel(iso: string) {
   return date ? date.toLocaleDateString(undefined, { weekday: 'short' }) : iso;
 }
 
-function buildLocalCoachReply(message: string, rituals: Ritual[]): { text: string; insightCard?: CoachInsightCard; suggestedActions?: CoachAction[] } {
+function buildLocalCoachReply(message: string, rituals: Ritual[], checkins: RitualCheckin[] = []): { text: string; insightCard?: CoachInsightCard; suggestedActions?: CoachAction[] } {
   if (!rituals.length) {
     return {
       text: 'Create your first ritual and I can start coaching from your real completion data.',
@@ -6989,6 +7299,32 @@ function buildLocalCoachReply(message: string, rituals: Ritual[]): { text: strin
   const weakestRate = percentFromWeekly(weakest.weekly);
   const broken = rituals.find((ritual) => !ritual.doneToday && ritual.streakDays >= 3);
   const lower = message.toLowerCase();
+  const asksAboutDelay = /miss|missed|incomplete|not complete|not done|late|delay|delayed|why|reason|study|studying|office|work|party|hangout|club|scroll|travel/.test(lower);
+
+  if (asksAboutDelay) {
+    const latestRelevant = checkins.find((checkin) => checkin.completionStatus === 'not_completed' || checkin.aiReasonCategory);
+    const target = latestRelevant
+      ? rituals.find((ritual) => ritual.id === latestRelevant.ritualId) ?? weakest
+      : rituals.find((ritual) => !ritual.doneToday && reminderWindowClosed(ritual)) ?? broken ?? weakest;
+    const classified = latestRelevant?.aiReasonCategory
+      ? { category: latestRelevant.aiReasonCategory, keyword: classifyReasonText(latestRelevant.userReasonRaw).keyword, summary: latestRelevant.aiReasonSummary ?? classifyReasonText(latestRelevant.userReasonRaw).summary }
+      : classifyReasonText(message);
+    const recovery = classified.category === 'valid_reason'
+      ? `${classified.keyword} is productive protected time. Move ${target.name} 30, 60, or 90 minutes later today, or reduce the target so the day still counts honestly.`
+      : classified.category === 'avoidable_distraction'
+        ? `${classified.keyword} is an avoidable time leak. Do a 2-minute version of ${target.name} now, then keep parties, hangouts, scrolling, or entertainment after the ritual.`
+        : `I need the exact blocker before judging it. Was it study/work/health/family, or was it entertainment, hangout, scrolling, or leisure travel?`;
+    return {
+      text: `${target.name} was not completed in its reminder window. ${latestRelevant ? `Last saved reason: "${latestRelevant.userReasonRaw}". ` : ''}${recovery}`,
+      insightCard: {
+        headline: `${target.name}: ${classified.keyword}`,
+        body: classified.summary,
+        bars: target.weekly,
+        metric: `${percentFromWeekly(target.weekly)}% weekly completion`,
+      },
+      suggestedActions: [{ id: `reschedule-${target.id}`, label: `Move ${target.name} reminder 60 minutes later`, type: 'reschedule_reminder', payload: { ritualId: target.id, reminderTime: addMinutesToTime(target.reminderTime, 60) } }],
+    };
+  }
 
   if (lower.includes('break') || lower.includes('streak')) {
     const target = broken ?? weakest;
@@ -7000,7 +7336,7 @@ function buildLocalCoachReply(message: string, rituals: Ritual[]): { text: strin
         bars: target.weekly,
         metric: `${percentFromWeekly(target.weekly)}% weekly completion`,
       },
-      suggestedActions: [{ id: `reschedule-${target.id}`, label: `Move ${target.name} reminder to 7pm`, type: 'reschedule_reminder', payload: { ritualId: target.id, reminderTime: '19:00' } }],
+      suggestedActions: [{ id: `reschedule-${target.id}`, label: `Move ${target.name} reminder 60 minutes later`, type: 'reschedule_reminder', payload: { ritualId: target.id, reminderTime: addMinutesToTime(target.reminderTime, 60) } }],
     };
   }
 
@@ -7031,6 +7367,7 @@ function CoachScreen({
   onSubmitCheckin,
   onCompleteLate,
   onAddRitual,
+  onRescheduleRitual,
   sheet = false,
 }: {
   rituals: Ritual[];
@@ -7040,6 +7377,7 @@ function CoachScreen({
   onSubmitCheckin?: (reason: string, ritualId?: string) => void | Promise<void>;
   onCompleteLate?: (ritual: Ritual) => void | Promise<void>;
   onAddRitual: (name: string, icon: string) => void | Promise<void>;
+  onRescheduleRitual?: (ritualId: string, reminderTime: string) => void | Promise<void>;
   sheet?: boolean;
 }) {
   const [messages, setMessages] = useState<CoachMessage[]>(() => [
@@ -7075,7 +7413,7 @@ function CoachScreen({
     setLoading(true);
     setMessages((current) => [...current, userMessage, { id: pendingId, role: 'assistant', text: '', pending: true }]);
 
-    const response = await requestCoachReply(trimmed, [...messages, userMessage], rituals).catch(() => ({
+    const response = await requestCoachReply(trimmed, [...messages, userMessage], rituals, latestCheckins).catch(() => ({
       text: 'I could not reach the coach endpoint. I can still help once Supabase is configured.',
     }));
 
@@ -7122,6 +7460,18 @@ function CoachScreen({
         { id: `confirm-${Date.now()}`, role: 'assistant', text: `${name} was added after your confirmation.` },
       ]);
       return;
+    }
+    if (action.type === 'reschedule_reminder') {
+      const ritualId = typeof action.payload?.ritualId === 'string' ? action.payload.ritualId : '';
+      const reminderTime = typeof action.payload?.reminderTime === 'string' ? action.payload.reminderTime : '';
+      if (ritualId && isValidReminderTime(reminderTime) && onRescheduleRitual) {
+        Promise.resolve(onRescheduleRitual(ritualId, reminderTime)).catch(() => undefined);
+        setMessages((current) => [
+          ...current,
+          { id: `confirm-${Date.now()}`, role: 'assistant', text: `Confirmed: ${action.label}. Reminder moved to ${formatReminderTime(reminderTime)}.` },
+        ]);
+        return;
+      }
     }
     setMessages((current) => [
       ...current,
@@ -7299,7 +7649,7 @@ function InsightsScreen({
       return;
     }
     setLoading(true);
-    requestCoachReply('Generate weekly recap', [], rituals).then((response) => {
+    requestCoachReply('Generate weekly recap', [], rituals, checkins).then((response) => {
       onGenerate(response.insightCard?.body ?? response.text);
       setLoading(false);
     }).catch(() => {
@@ -7827,6 +8177,7 @@ function TodayTourOverlay({
   totalSteps,
   topInset,
   bottomInset,
+  values,
   onNext,
   onSkip,
 }: {
@@ -7836,21 +8187,99 @@ function TodayTourOverlay({
   totalSteps: number;
   topInset: number;
   bottomInset: number;
+  values: Record<TodayTourStep['id'], string>;
   onNext: () => void;
   onSkip: () => void;
 }) {
-  const { height } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
 
   if (!visible) {
     return null;
   }
 
-  const rawCardTop = step.id === 'goal' ? Math.max(topInset + 332, 330) : Math.max(topInset + 76, 92);
+  const headerTop = Math.max(topInset, 12) + 8;
+  const metricWidth = 42;
+  const metricGap = 4;
+  const metricGroupLeft = Math.max(214, width - 20 - metricWidth * 3 - metricGap * 2);
+  const metricTop = headerTop + 10;
+  const targetByStep: Record<TodayTourStep['id'], { left: number; top: number; width: number; height: number; radius: number; labelSide: 'top' | 'bottom' }> = {
+    goal: {
+      left: Math.max(74, width / 2 - 74),
+      top: Math.max(topInset + 174, 188),
+      width: 148,
+      height: 148,
+      radius: 74,
+      labelSide: 'bottom',
+    },
+    streak: {
+      left: metricGroupLeft - 3,
+      top: metricTop - 4,
+      width: 48,
+      height: 40,
+      radius: 20,
+      labelSide: 'bottom',
+    },
+    points: {
+      left: metricGroupLeft + metricWidth + metricGap - 3,
+      top: metricTop - 4,
+      width: 48,
+      height: 40,
+      radius: 20,
+      labelSide: 'bottom',
+    },
+    hearts: {
+      left: metricGroupLeft + (metricWidth + metricGap) * 2 - 3,
+      top: metricTop - 4,
+      width: 48,
+      height: 40,
+      radius: 20,
+      labelSide: 'bottom',
+    },
+    activity: {
+      left: 28,
+      top: Math.min(Math.max(topInset + 506, 500), height - bottomInset - 214),
+      width: width - 56,
+      height: 74,
+      radius: 22,
+      labelSide: 'top',
+    },
+  };
+  const target = targetByStep[step.id];
+  const rawCardTop = step.id === 'goal'
+    ? Math.min(target.top + target.height + 24, height - bottomInset - 232)
+    : Math.max(topInset + 76, 92);
   const cardTop = Math.max(topInset + 72, Math.min(rawCardTop, height - bottomInset - 236));
+  const badgeTop = target.labelSide === 'top' ? target.top - 38 : target.top + target.height + 8;
+  const badgeLeft = Math.max(18, Math.min(target.left + target.width / 2 - 68, width - 154));
 
   return (
     <View style={styles.tourRoot}>
       <View style={styles.tourScrim} />
+      <View
+        pointerEvents="none"
+        style={[
+          styles.tourTarget,
+          {
+            left: target.left,
+            top: target.top,
+            width: target.width,
+            height: target.height,
+            borderRadius: target.radius,
+            borderColor: step.color,
+            shadowColor: step.color,
+          },
+        ]}
+      >
+        <View style={[styles.tourTargetGlow, { borderRadius: target.radius, backgroundColor: `${step.color}12` }]} />
+        <View style={[styles.tourTargetCenter, { borderColor: `${step.color}44` }]}>
+          <Text style={styles.tourTargetIcon}>{step.icon}</Text>
+          <Text numberOfLines={1} style={[styles.tourTargetValue, { color: step.color }]}>{values[step.id]}</Text>
+        </View>
+      </View>
+      <View pointerEvents="none" style={[styles.tourTargetBadge, { left: badgeLeft, top: badgeTop, borderColor: `${step.color}33` }]}>
+        <Text style={[styles.tourTargetBadgeIcon, { color: step.color }]}>{step.icon}</Text>
+        <Text numberOfLines={1} style={styles.tourTargetBadgeText}>{step.title}</Text>
+      </View>
       <View style={[styles.tourCard, { top: cardTop }]}>
         <View style={[styles.tourIcon, { backgroundColor: `${step.color}18` }]}>
           <Text style={styles.tourIconText}>{step.icon}</Text>
@@ -8401,6 +8830,7 @@ function CoachChatSheet({
   onSubmitCheckin,
   onCompleteLate,
   onAddRitual,
+  onRescheduleRitual,
 }: {
   open: boolean;
   rituals: Ritual[];
@@ -8411,6 +8841,7 @@ function CoachChatSheet({
   onSubmitCheckin: (reason: string, ritualId?: string) => void | Promise<void>;
   onCompleteLate: (ritual: Ritual) => void | Promise<void>;
   onAddRitual: (name: string, icon: string) => void | Promise<void>;
+  onRescheduleRitual: (ritualId: string, reminderTime: string) => void | Promise<void>;
 }) {
   const insets = useSafeAreaInsets();
   const { height, width } = useWindowDimensions();
@@ -8457,6 +8888,7 @@ function CoachChatSheet({
               onSubmitCheckin={onSubmitCheckin}
               onCompleteLate={onCompleteLate}
               onAddRitual={onAddRitual}
+              onRescheduleRitual={onRescheduleRitual}
               sheet
             />
           </View>
@@ -9847,7 +10279,7 @@ const styles = StyleSheet.create({
     marginBottom: 18,
   },
   onboardingTitle: {
-    fontFamily: fontSerifSemi,
+    fontFamily: fontBodyBold,
     fontSize: 26,
     lineHeight: 32,
     color: colors.ink,
@@ -9907,6 +10339,9 @@ const styles = StyleSheet.create({
     shadowRadius: 14,
     elevation: 2,
   },
+  dreamCardSelected: {
+    backgroundColor: '#F5FAFF',
+  },
   dreamIcon: {
     width: 46,
     height: 46,
@@ -9922,7 +10357,7 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   dreamTitle: {
-    fontFamily: fontSerifSemi,
+    fontFamily: fontBodyBold,
     fontSize: 15.5,
     color: colors.ink,
   },
@@ -9968,14 +10403,20 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
     borderWidth: 1,
     borderColor: 'rgba(120,140,180,0.14)',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
     padding: 12,
     ...shadow,
     shadowOpacity: 0.08,
     shadowRadius: 14,
     shadowOffset: { width: 0, height: 8 },
+  },
+  starterMain: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  starterRowSelected: {
+    borderColor: 'rgba(79,168,255,0.32)',
+    backgroundColor: '#F5FAFF',
   },
   starterIcon: {
     width: 44,
@@ -9992,7 +10433,7 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   starterName: {
-    fontFamily: fontSerifSemi,
+    fontFamily: fontBodyBold,
     fontSize: 15,
     color: colors.ink,
   },
@@ -10001,6 +10442,35 @@ const styles = StyleSheet.create({
     fontSize: 11.5,
     color: colors.inkSoft,
     marginTop: 3,
+  },
+  starterTimeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 7,
+    marginTop: 12,
+    paddingLeft: 56,
+  },
+  starterTimeChip: {
+    minHeight: 30,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(120,140,180,0.16)',
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  starterTimeChipSelected: {
+    borderColor: colors.blue1,
+    backgroundColor: 'rgba(79,168,255,0.12)',
+  },
+  starterTimeChipText: {
+    fontFamily: fontBodyBold,
+    fontSize: 11,
+    color: colors.inkSoft,
+  },
+  starterTimeChipTextSelected: {
+    color: colors.blue1,
   },
   profileSetupScroll: {
     flexGrow: 1,
@@ -10648,8 +11118,8 @@ const styles = StyleSheet.create({
   topRow: {
     minHeight: 52,
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
+    gap: 12,
     marginBottom: 18,
     position: 'relative',
   },
@@ -10669,26 +11139,23 @@ const styles = StyleSheet.create({
     fontSize: 19,
   },
   greetingBlock: {
-    position: 'absolute',
-    left: 52,
-    right: 150,
-    top: 0,
-    bottom: 0,
-    alignItems: 'center',
+    flex: 1,
+    minWidth: 0,
+    alignItems: 'flex-start',
     justifyContent: 'center',
-    paddingHorizontal: 6,
   },
   greetingSub: {
     fontFamily: fontBody,
-    fontSize: 12,
+    fontSize: 11.5,
     color: colors.inkSoft,
-    textAlign: 'center',
+    textAlign: 'left',
+    marginTop: 2,
   },
   greetingName: {
     fontFamily: fontBodyBold,
-    fontSize: 16,
+    fontSize: 17,
     color: colors.ink,
-    marginTop: 2,
+    textAlign: 'left',
   },
   bellButton: {
     width: 42,
@@ -11100,15 +11567,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'flex-end',
-    gap: 5,
+    gap: 3,
     flexShrink: 0,
     marginLeft: 'auto',
   },
   headerStatPill: {
-    minWidth: 46,
-    height: 34,
-    borderRadius: 17,
-    paddingHorizontal: 7,
+    minWidth: 38,
+    height: 32,
+    borderRadius: 16,
+    paddingHorizontal: 5,
     backgroundColor: '#FFFFFF',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.82)',
@@ -11171,18 +11638,85 @@ const styles = StyleSheet.create({
     right: 0,
     top: 0,
     bottom: 0,
-    backgroundColor: '#EEF1F4',
+    backgroundColor: 'rgba(237,242,250,0.66)',
+  },
+  tourTarget: {
+    position: 'absolute',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.72)',
+    borderWidth: 2,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.28,
+    shadowRadius: 18,
+    elevation: 16,
+  },
+  tourTargetGlow: {
+    position: 'absolute',
+    left: -6,
+    right: -6,
+    top: -6,
+    bottom: -6,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.9)',
+  },
+  tourTargetCenter: {
+    minWidth: 40,
+    height: 30,
+    borderRadius: 15,
+    paddingHorizontal: 8,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+  },
+  tourTargetIcon: {
+    fontSize: 14,
+  },
+  tourTargetValue: {
+    fontFamily: fontBodyExtra,
+    fontSize: 12,
+  },
+  tourTargetBadge: {
+    position: 'absolute',
+    minWidth: 112,
+    maxWidth: 136,
+    height: 30,
+    borderRadius: 15,
+    paddingHorizontal: 10,
+    backgroundColor: 'rgba(255,255,255,0.96)',
+    borderWidth: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    shadowColor: '#30466F',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.12,
+    shadowRadius: 14,
+    elevation: 8,
+  },
+  tourTargetBadgeIcon: {
+    fontSize: 13,
+  },
+  tourTargetBadgeText: {
+    flexShrink: 1,
+    fontFamily: fontBodyBold,
+    fontSize: 11.5,
+    color: colors.ink,
   },
   tourCard: {
     position: 'absolute',
     left: 20,
     right: 20,
-    borderRadius: 22,
+    borderRadius: 24,
     backgroundColor: '#FFFFFF',
     borderWidth: 1,
     borderColor: 'rgba(255,255,255,0.78)',
-    padding: 16,
-    paddingBottom: 58,
+    padding: 18,
+    paddingBottom: 62,
     flexDirection: 'row',
     alignItems: 'flex-start',
     gap: 12,
@@ -11192,9 +11726,9 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 14 },
   },
   tourIcon: {
-    width: 42,
-    height: 42,
-    borderRadius: 15,
+    width: 46,
+    height: 46,
+    borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
     flexShrink: 0,
@@ -11214,13 +11748,13 @@ const styles = StyleSheet.create({
   },
   tourTitle: {
     fontFamily: fontBodyBold,
-    fontSize: 15,
+    fontSize: 16,
     color: colors.ink,
   },
   tourBody: {
     fontFamily: fontBody,
-    fontSize: 12.5,
-    lineHeight: 18,
+    fontSize: 13,
+    lineHeight: 19,
     color: colors.inkSoft,
     marginTop: 6,
   },
@@ -11661,7 +12195,7 @@ const styles = StyleSheet.create({
     paddingRight: 12,
   },
   screenTitle: {
-    fontFamily: fontSerif,
+    fontFamily: fontBodyBold,
     fontSize: 22,
     color: colors.ink,
   },
@@ -11704,15 +12238,18 @@ const styles = StyleSheet.create({
   statGrid: {
     flexDirection: 'row',
     gap: 12,
-    marginBottom: 16,
+    marginBottom: 18,
   },
   statCard: {
     flex: 1,
-    borderRadius: 22,
-    padding: 16,
+    minHeight: 86,
+    borderRadius: 18,
+    paddingVertical: 16,
+    paddingHorizontal: 18,
+    justifyContent: 'center',
   },
   statNum: {
-    fontFamily: fontSerifBold,
+    fontFamily: fontBodyBold,
     fontSize: 30,
     color: colors.ink,
   },
@@ -11723,8 +12260,8 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   weekCard: {
-    borderRadius: 22,
-    padding: 18,
+    borderRadius: 24,
+    padding: 20,
     marginBottom: 16,
   },
   weekHead: {
@@ -11735,14 +12272,14 @@ const styles = StyleSheet.create({
   },
   weekTitle: {
     fontFamily: fontBodyExtra,
-    fontSize: 14.5,
+    fontSize: 17,
     color: colors.ink,
   },
   pillPct: {
-    backgroundColor: 'rgba(79,168,255,0.12)',
+    backgroundColor: 'rgba(79,168,255,0.16)',
     borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 5,
   },
   pillPctText: {
     fontFamily: fontBodyExtra,
@@ -11756,19 +12293,19 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   rangeToggle: {
-    minHeight: 36,
-    borderRadius: 18,
-    backgroundColor: 'rgba(120,140,180,0.12)',
-    padding: 3,
-    marginBottom: 12,
+    minHeight: 40,
+    borderRadius: 14,
+    backgroundColor: '#EEF2F8',
+    padding: 4,
+    marginBottom: 18,
     flexDirection: 'row',
   },
   rangeToggleOption: {
     flex: 1,
-    borderRadius: 15,
+    borderRadius: 11,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 7,
+    paddingVertical: 9,
   },
   rangeToggleText: {
     fontFamily: fontBodyExtra,
@@ -11814,18 +12351,192 @@ const styles = StyleSheet.create({
     minHeight: 164,
     alignContent: 'flex-start',
   },
-  heatGrid: {
+  progressCalendar: {
+    paddingTop: 2,
+  },
+  progressCalendarHead: {
+    minHeight: 34,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  progressCalendarTitle: {
+    fontFamily: fontBodyExtra,
+    fontSize: 14,
+    color: colors.ink,
+  },
+  progressCalendarNav: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  progressCalendarNavButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#F3F6FC',
+    borderWidth: 1,
+    borderColor: 'rgba(120,140,180,0.16)',
+  },
+  progressWeekdays: {
+    flexDirection: 'row',
+    marginBottom: 8,
+  },
+  progressWeekday: {
+    flex: 1,
+    fontFamily: fontBodyBold,
+    fontSize: 11,
+    color: colors.inkFaint,
+    textAlign: 'center',
+  },
+  progressMonthGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 6,
+    paddingBottom: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+  },
+  progressDayCell: {
+    width: '12.3%',
+    aspectRatio: 1,
+    borderRadius: 9,
+    alignItems: 'flex-start',
+    justifyContent: 'flex-start',
+    paddingTop: 6,
+    paddingLeft: 7,
+  },
+  progressDayBlank: {
+    opacity: 0,
+  },
+  progressDayMissed: {
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderColor: 'rgba(120,140,180,0.22)',
+  },
+  progressDayPartial: {
+    backgroundColor: colors.blue2,
+    borderWidth: 1,
+    borderColor: 'rgba(79,168,255,0.28)',
+  },
+  progressDayDone: {
+    backgroundColor: colors.blue1,
+    borderWidth: 1,
+    borderColor: colors.blue1,
+  },
+  progressDayToday: {
+    borderWidth: 2,
+    borderColor: colors.blue1,
+  },
+  progressDayText: {
+    fontFamily: fontBodyBold,
+    fontSize: 11,
+    color: colors.inkSoft,
+  },
+  progressDayTextDone: {
+    color: '#FFFFFF',
+  },
+  progressLegend: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
     marginTop: 14,
-    marginBottom: 10,
+  },
+  progressLegendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  progressLegendDot: {
+    width: 9,
+    height: 9,
+    borderRadius: 3,
+  },
+  progressLegendMissed: {
+    backgroundColor: '#E9EEF7',
+  },
+  progressLegendPartial: {
+    backgroundColor: colors.blue2,
+  },
+  progressLegendDone: {
+    backgroundColor: colors.blue1,
+  },
+  progressLegendText: {
+    fontFamily: fontBody,
+    fontSize: 11,
+    color: colors.inkSoft,
+  },
+  progressMonthStats: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 14,
+  },
+  progressMonthStat: {
+    flex: 1,
+    minHeight: 62,
+    borderRadius: 14,
+    backgroundColor: '#F4F7FD',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+  },
+  progressMonthStatValue: {
+    fontFamily: fontBodyBold,
+    fontSize: 18,
+    color: colors.ink,
+  },
+  progressMonthStatLabel: {
+    fontFamily: fontBody,
+    fontSize: 10.5,
+    color: colors.inkSoft,
+    marginTop: 2,
+    textAlign: 'center',
+  },
+  heatGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 7,
+    marginTop: 8,
+    marginBottom: 14,
   },
   heatCell: {
-    width: '8.2%',
+    width: '11.7%',
+    minHeight: 24,
     aspectRatio: 1,
-    borderRadius: 6,
+    borderRadius: 8,
     overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(120,140,180,0.18)',
+  },
+  heatSummaryRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 10,
+  },
+  heatSummaryItem: {
+    flex: 1,
+    minHeight: 58,
+    borderRadius: 14,
+    backgroundColor: '#F4F7FD',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+  },
+  heatSummaryValue: {
+    fontFamily: fontBodyBold,
+    fontSize: 17,
+    color: colors.ink,
+  },
+  heatSummaryLabel: {
+    fontFamily: fontBody,
+    fontSize: 10.5,
+    color: colors.inkSoft,
+    marginTop: 2,
+    textAlign: 'center',
   },
   heatNote: {
     fontFamily: fontBody,
@@ -12187,7 +12898,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   pstatNum: {
-    fontFamily: fontSerifBold,
+    fontFamily: fontBodyBold,
     fontSize: 20,
     color: colors.ink,
   },

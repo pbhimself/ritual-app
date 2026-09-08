@@ -16,6 +16,8 @@ type Report = {
   mostMissedTaskCategory: string | null;
   commonValidReasons: string[];
   commonAvoidableDistractions: string[];
+  productiveTimeKeywords: string[];
+  avoidableTimeKeywords: string[];
   timeWastingPattern: string;
   bestPerformingDays: string[];
   weakAreas: string[];
@@ -97,12 +99,22 @@ function buildReport(habits: Array<{ id: string; name: string; color?: string | 
   const missedByCategory = new Map<string, number>();
   const valid = new Map<string, number>();
   const avoidable = new Map<string, number>();
+  const productiveKeywords = new Map<string, number>();
+  const avoidableKeywords = new Map<string, number>();
   checkins.forEach((row) => {
     if (row.task_category) missedByCategory.set(row.task_category, (missedByCategory.get(row.task_category) ?? 0) + 1);
     const reason = (row.user_reason_raw ?? '').trim();
     if (!reason) return;
-    if (row.ai_reason_category === 'valid_reason') valid.set(reason, (valid.get(reason) ?? 0) + 1);
-    if (row.ai_reason_category === 'avoidable_distraction') avoidable.set(reason, (avoidable.get(reason) ?? 0) + 1);
+    const classified = classifyReasonText(reason);
+    const reasonCategory = row.ai_reason_category ?? classified.category;
+    if (reasonCategory === 'valid_reason') {
+      valid.set(reason, (valid.get(reason) ?? 0) + 1);
+      productiveKeywords.set(classified.keyword, (productiveKeywords.get(classified.keyword) ?? 0) + 1);
+    }
+    if (reasonCategory === 'avoidable_distraction') {
+      avoidable.set(reason, (avoidable.get(reason) ?? 0) + 1);
+      avoidableKeywords.set(classified.keyword, (avoidableKeywords.get(classified.keyword) ?? 0) + 1);
+    }
   });
   const totalTasksCreated = habits.filter((habit) => !habit.created_at || habit.created_at.slice(0, 10) <= end).length;
   const completedLate = checkins.filter((row) => row.completed_late || row.completion_status === 'completed_late').length;
@@ -114,6 +126,8 @@ function buildReport(habits: Array<{ id: string; name: string; color?: string | 
   const bestPerformingDays = [...dayCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2).map(([day]) => day);
   const weakAreas = [...missedByCategory.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([category]) => category);
   const topAvoidable = [...avoidable.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+  const topAvoidableKeywords = topKeys(avoidableKeywords);
+  const topProductiveKeywords = topKeys(productiveKeywords);
   const topWeakArea = weakAreas[0];
   return {
     window: { start, end, intervalDays, timeZone },
@@ -124,19 +138,51 @@ function buildReport(habits: Array<{ id: string; name: string; color?: string | 
     mostMissedTaskCategory: weakAreas[0] ?? null,
     commonValidReasons: topKeys(valid),
     commonAvoidableDistractions: topKeys(avoidable),
+    productiveTimeKeywords: topProductiveKeywords,
+    avoidableTimeKeywords: topAvoidableKeywords,
     timeWastingPattern: topAvoidable
-      ? `${topAvoidable}${topWeakArea ? ` most often affected ${topWeakArea}.` : ' showed up as the main avoidable distraction.'}`
+      ? `${topAvoidableKeywords.length ? topAvoidableKeywords.join(', ') : topAvoidable} took time from ${topWeakArea ?? 'planned rituals'}.`
       : 'No repeated avoidable-distraction pattern recorded.',
     bestPerformingDays,
     weakAreas,
-    advice: avoidable.size ? 'Complete the smallest version of the ritual before entertainment or scrolling, and move reminders earlier when needed.' : 'Keep the current cue stable and record the exact blocker when a ritual slips.',
+    advice: avoidable.size
+      ? 'For party, hangout, clubbing, scrolling, or entertainment, do a 2-minute version before the fun activity and let the fun become the reward.'
+      : topProductiveKeywords.length
+        ? `Your protected time is mostly going into ${topProductiveKeywords.join(', ')}. Keep that priority, then recover rituals 30, 60, or 90 minutes later.`
+        : 'Keep the current cue stable and record the exact blocker when a ritual slips.',
   };
 }
 
 function topKeys(values: Map<string, number>) { return [...values.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([key]) => key); }
 
+function classifyReasonText(reason: string): { category: 'valid_reason' | 'avoidable_distraction' | 'unclear_reason'; keyword: string } {
+  const lower = reason.trim().toLowerCase();
+  const has = (pattern: RegExp) => pattern.test(lower);
+  const forcedTravel = has(/\b(commute|traffic|train delay|bus delay|flight delay|work trip|business trip|office travel|travel for work)\b/i);
+  const leisureTravel = has(/\b(trip|outing|road trip|vacation|holiday|tour|hangout|hang out|club|clubbing|party|partying)\b/i);
+  const validMatch = [
+    { keyword: 'studying', pattern: /\b(study|studying|class|exam|assignment|lecture|college|school|homework|revision|practice)\b/i },
+    { keyword: 'work', pattern: /\b(work|office|job|shift|client|meeting|deadline|workload|project|overtime)\b/i },
+    { keyword: 'health', pattern: /\b(health|sick|ill|fever|doctor|hospital|medicine|injury|therapy)\b/i },
+    { keyword: 'family responsibility', pattern: /\b(family|parent|child|care|emergency|responsibility|urgent)\b/i },
+    { keyword: 'necessary travel', pattern: /\b(commute|traffic|train delay|bus delay|flight delay|work trip|business trip|office travel|travel for work)\b/i },
+  ].find(({ pattern }) => has(pattern));
+  const avoidableMatch = [
+    { keyword: 'party', pattern: /\b(party|partying|club|clubbing|bar|drinks?)\b/i },
+    { keyword: 'hangout', pattern: /\b(hangout|hang out|friends|date|chill|outing)\b/i },
+    { keyword: 'social media', pattern: /\b(scroll|instagram|reels?|youtube|shorts|social media|tiktok|facebook)\b/i },
+    { keyword: 'entertainment', pattern: /\b(movie|netflix|series|gaming|game|fun|entertainment|timepass)\b/i },
+    { keyword: 'leisure travel', pattern: /\b(trip|road trip|vacation|holiday|tour)\b/i },
+  ].find(({ pattern }) => has(pattern));
+  const vague = !lower || has(/\b(busy|forgot|no time|could not|couldn't|not able|later|something came up)\b/i);
+
+  if (avoidableMatch && (!validMatch || leisureTravel || !forcedTravel)) return { category: 'avoidable_distraction', keyword: avoidableMatch.keyword };
+  if (validMatch && !vague) return { category: 'valid_reason', keyword: validMatch.keyword };
+  return { category: 'unclear_reason', keyword: 'unclear blocker' };
+}
+
 async function improveAdvice(apiKey: string, report: Report) {
-  const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', { method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'moonshotai/kimi-k3', max_tokens: 220, temperature: 0.3, messages: [{ role: 'system', content: 'Return one supportive, honest habit-advice paragraph based only on the supplied report. Do not invent numbers.' }, { role: 'user', content: JSON.stringify(report) }] }) });
+  const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', { method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'moonshotai/kimi-k3', max_tokens: 240, temperature: 0.25, messages: [{ role: 'system', content: 'Return one supportive, honest habit-advice paragraph based only on the supplied report. Say productive protected time is good when reasons are studying, work, health, family, or necessary commute. Say avoidable time leak when reasons are party, hangout, clubbing, scrolling, gaming, entertainment, or leisure travel. Recommend recovery in 30, 60, or 90 minutes when useful. Do not invent numbers.' }, { role: 'user', content: JSON.stringify(report) }] }) });
   if (!response.ok) throw new Error('NVIDIA request failed');
   const json = await response.json();
   return typeof json?.choices?.[0]?.message?.content === 'string' ? json.choices[0].message.content.trim() : report.advice;

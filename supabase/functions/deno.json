@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "strict": true
+  },
+  "fmt": {
+    "include": ["."]
+  },
+  "lint": {
+    "include": ["."],
+    "rules": {
+      "exclude": ["no-import-prefix"]
+    }
+  }
+}
