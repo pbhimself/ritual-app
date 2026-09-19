@@ -8,7 +8,8 @@ import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import Constants from 'expo-constants';
 import * as ExpoLinking from 'expo-linking';
-import DateTimePicker from '@react-native-community/datetimepicker';
+import * as WebBrowser from 'expo-web-browser';
+import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
 import {
   Animated,
   AppState,
@@ -39,6 +40,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AppBootstrap from './src/components/AppBootstrap';
 import LaunchSplash from './src/components/LaunchSplash';
 import { useEntranceAnimation, useReducedMotion } from './src/hooks/motion';
+import { offlineCoachReply, parseCoachReply, ritualMetrics, type CoachReply } from './src/lib/coach';
 import Reanimated, {
   cancelAnimation,
   Easing as ReanimatedEasing,
@@ -303,6 +305,7 @@ type CoachMessage = {
   insightCard?: CoachInsightCard;
   suggestedActions?: CoachAction[];
   pending?: boolean;
+  source?: 'ai' | 'offline';
 };
 
 type SupabaseHabit = {
@@ -544,6 +547,10 @@ const supabaseAnonKey = readRuntimeString(
 );
 const nativeAuthRedirectUrl = `${APP_SCHEME}://${AUTH_CALLBACK_PATH}`;
 const authRedirectUrl = Platform.OS === 'web' && typeof window !== 'undefined' ? window.location.origin : nativeAuthRedirectUrl;
+
+if (Platform.OS === 'web') {
+  WebBrowser.maybeCompleteAuthSession({ skipRedirectCheck: true });
+}
 
 function createSupabaseClient() {
   if (!supabaseUrl || !supabaseAnonKey) {
@@ -1656,7 +1663,10 @@ async function generateFloCheckinReply(ritual: Ritual, reason: string, tone: Flo
   }
 
   try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) return fallback;
     const { data, error } = await supabase.functions.invoke('flo-checkin-reply', {
+      timeout: 18000,
       body: {
         ritual: {
           name: ritual.name,
@@ -1941,6 +1951,46 @@ async function createSessionFromAuthUrl(url: string): Promise<SupabaseSession | 
     throw error;
   }
   return data.session ?? null;
+}
+
+async function signInWithGoogleOAuth(): Promise<SupabaseSession | null> {
+  if (!supabase) {
+    throw new Error('Google sign-in is not configured. Add Supabase settings, then restart the app.');
+  }
+
+  const { data, error } = await supabase.auth.signInWithOAuth({
+    provider: 'google',
+    options: {
+      redirectTo: authRedirectUrl,
+      skipBrowserRedirect: Platform.OS !== 'web',
+      queryParams: {
+        prompt: 'select_account',
+      },
+    },
+  });
+
+  if (error) {
+    throw error;
+  }
+
+  if (Platform.OS === 'web') {
+    return null;
+  }
+
+  if (!data?.url) {
+    throw new Error('Google did not return a sign-in URL. Check the Supabase Google provider setup.');
+  }
+
+  await WebBrowser.warmUpAsync().catch(() => undefined);
+  try {
+    const result = await WebBrowser.openAuthSessionAsync(data.url, authRedirectUrl);
+    if (result.type === 'success' && 'url' in result) {
+      return createSessionFromAuthUrl(result.url);
+    }
+    throw new Error('Google sign-in was cancelled.');
+  } finally {
+    WebBrowser.coolDownAsync().catch(() => undefined);
+  }
 }
 
 function isAuthNetworkError(error: unknown) {
@@ -2346,41 +2396,37 @@ async function loadSupabaseFlowState(userId: string): Promise<Partial<SavedFlowS
   }
 
   const since = isoDaysBack(30)[0];
-  const { data: habits, error: habitsError } = await supabase
+  const habitsRequest = supabase
     .from('habits')
     .select('id,name,icon,color,palette_key,why,goal_amount,goal_unit,reminder_time,created_at')
     .eq('user_id', userId)
     .eq('is_archived', false)
     .order('created_at', { ascending: true });
 
-  if (habitsError) {
-    throw habitsError;
-  }
-
-  const { data: logs, error: logsError } = await supabase
+  const logsRequest = supabase
     .from('habit_logs')
     .select('habit_id,activity_date,log_date,completed,completed_at')
     .eq('user_id', userId)
     .eq('completed', true)
     .gte('activity_date', since);
 
-  if (logsError) {
-    throw logsError;
-  }
-
-  const profile = await supabase
+  const profileRequest = supabase
     .from('profiles')
     .select('haptics_enabled,push_enabled,flo_tone,report_interval_days')
     .eq('id', userId)
     .maybeSingle();
+  const [{ data: habits, error: habitsError }, { data: logs, error: logsError }, profile] = await Promise.all([habitsRequest, logsRequest, profileRequest]);
+  if (habitsError || logsError || profile.error) throw habitsError ?? logsError ?? profile.error;
   const profileData = profile.data as Pick<SupabaseProfile, 'haptics_enabled' | 'push_enabled' | 'flo_tone' | 'report_interval_days'> | null;
   let checkins: RitualCheckin[] = [];
   try {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('ritual_checkins')
-      .select('id,ritual_id,habit_id,checkin_date,date,scheduled_window,user_reason_raw,category,flo_message,streak_protected,suggested_action,task_category,planned_closing_time,reminder_time,actual_response_time,completion_status,completed_late,ai_reason_category,ai_reason_summary,ai_advice,created_at')
+      .select('id,ritual_id,habit_id,checkin_date,scheduled_window,user_reason_raw,category,flo_message,streak_protected,suggested_action,task_category,planned_closing_time,reminder_time,actual_response_time,completion_status,completed_late,ai_reason_category,ai_reason_summary,ai_advice,created_at')
       .eq('user_id', userId)
-      .gte('checkin_date', isoDaysBack(30)[0]);
+      .gte('checkin_date', isoDaysBack(30)[0])
+      .order('created_at', { ascending: false });
+    if (error) throw error;
     checkins = ((data ?? []) as SupabaseRitualCheckin[]).map((row, index) => ({
       id: row.id || `remote-checkin-${index}`,
       ritualId: row.ritual_id || row.habit_id || '',
@@ -2402,8 +2448,8 @@ async function loadSupabaseFlowState(userId: string): Promise<Partial<SavedFlowS
       aiAdvice: row.ai_advice ?? undefined,
       resolvedAt: row.created_at ? Date.parse(row.created_at) : undefined,
     })).filter((checkin) => Boolean(checkin.ritualId));
-  } catch {
-    checkins = [];
+  } catch (error) {
+    throw error;
   }
   const rituals = ritualsFromSupabaseRows((habits ?? []) as SupabaseHabit[], (logs ?? []) as SupabaseHabitLog[]);
 
@@ -2945,6 +2991,36 @@ function AuthGate({
     }
   };
 
+  const submitGoogleSignIn = async () => {
+    clearFeedback();
+    if (!supabase) {
+      setError('Google sign-in is not configured. Add Supabase settings, then restart the app.');
+      return;
+    }
+    try {
+      setSubmitting(true);
+      setMessage(Platform.OS === 'web' ? 'Opening Google sign-in...' : '');
+      const session = await signInWithGoogleOAuth();
+      if (!session?.user) {
+        if (Platform.OS !== 'web') {
+          setMessage('Google sign-in did not complete.');
+        }
+        return;
+      }
+      const profile = await getProfileForUser(session.user);
+      const nextAccount = await withFirstRunTourPending(buildAuthAccountFromUser(session.user, profile));
+      onLogin(nextAccount);
+    } catch (authError) {
+      setError(cleanAuthError(
+        authError,
+        'Unable to continue with Google.',
+        'Secure connection to Supabase failed on this device, so Google sign-in could not finish. Check automatic date/time, update Android System WebView or Chrome, try another network, then try again.',
+      ));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const submitCreate = async () => {
     clearFeedback();
     const trimmedName = fullName.trim();
@@ -3417,7 +3493,7 @@ function AuthGate({
                         <View style={styles.authDividerLine} />
                       </View>
                       <View style={styles.authSocialRow}>
-                        <SocialButton label="Google" reduceMotion={reduceMotion} onPress={() => setMessage('Google sign-in will connect after Supabase Auth setup.')} />
+                        <SocialButton label="Google" reduceMotion={reduceMotion} disabled={submitting} onPress={submitGoogleSignIn} />
                       </View>
                     </>
                   ) : null}
@@ -4526,12 +4602,13 @@ function PolicyModal({ policy, onClose }: { policy: PolicyKey | null; onClose: (
   );
 }
 
-function SocialButton({ label, reduceMotion, onPress }: { label: 'Google'; reduceMotion: boolean; onPress: () => void }) {
+function SocialButton({ label, reduceMotion, disabled = false, onPress }: { label: 'Google'; reduceMotion: boolean; disabled?: boolean; onPress: () => void }) {
   return (
     <PressScale
       reduceMotion={reduceMotion}
+      disabled={disabled}
       onPress={onPress}
-      style={[styles.authSocialButton, styles.authSocialButtonGoogle]}
+      style={[styles.authSocialButton, styles.authSocialButtonGoogle, disabled && styles.authPrimaryButtonDisabled]}
     >
       <GoogleGMark />
       <Text style={[styles.authSocialText, styles.authSocialTextGoogle]}>
@@ -4554,12 +4631,14 @@ function GoogleGMark() {
 
 function PressScale({
   children,
+  accessibilityLabel,
   onPress,
   style,
   reduceMotion,
   disabled = false,
 }: {
   children: ReactNode;
+  accessibilityLabel?: string;
   onPress?: () => void;
   style?: StyleProp<ViewStyle>;
   reduceMotion: boolean;
@@ -4572,6 +4651,9 @@ function PressScale({
 
   return (
     <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel}
+      accessibilityState={{ disabled }}
       disabled={disabled}
       onPress={onPress}
       onPressIn={() => {
@@ -4620,6 +4702,8 @@ function FlowApp({
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
   const reduceMotion = useReducedMotion();
+  const currentTime = useMinuteNow();
+  const currentDate = todayIso(currentTime);
   const [activeTab, setActiveTab] = useState<TabKey>(initialTab);
   const [rituals, setRituals] = useState(defaultState.rituals);
   const [checkins, setCheckins] = useState(defaultState.checkins);
@@ -4643,8 +4727,6 @@ function FlowApp({
   const [particles, setParticles] = useState<BurstParticle[]>([]);
   const [newRitualId, setNewRitualId] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
-  const [tabLoading, setTabLoading] = useState(false);
-  const tabLoadingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [starterOnboardingAllowed, setStarterOnboardingAllowed] = useState(starterOnboardingPending && firstRunTourPending);
   const [todayTourSeen, setTodayTourSeen] = useState(!firstRunTourPending);
   const isTablet = width >= TABLET_MIN_WIDTH;
@@ -4657,6 +4739,8 @@ function FlowApp({
     Keyboard.dismiss();
     setCoachOpen(false);
   }, []);
+  const editRitual = useCallback((ritual: Ritual) => setEditingRitualId(ritual.id), []);
+  const openProfile = useCallback(() => setActiveTab('profile'), []);
 
   useEffect(() => {
     setStarterOnboardingAllowed(starterOnboardingPending && firstRunTourPending);
@@ -4708,15 +4792,13 @@ function FlowApp({
     };
 
     const hydrate = async () => {
-      const local = await loadLocal();
-      const storedTourSeen = await AsyncStorage.getItem(todayTourSeenStorageKey).catch(() => null);
+      const [local, storedTourSeen] = await Promise.all([loadLocal(), AsyncStorage.getItem(todayTourSeenStorageKey).catch(() => null)]);
       const tourAlreadySeen = storedTourSeen === 'true';
       if (supabase && canUseRemote && userId) {
         try {
           const remote = await loadSupabaseFlowState(userId);
           if (remote) {
-            const remoteState = normalizeState({ ...defaultState, ...remote });
-            const state = remoteState.rituals.length || !local.rituals.length ? remoteState : local;
+            const state = normalizeState({ ...local, ...remote, stateDate: todayIso() });
             if (mounted) {
               applyState(state, tourAlreadySeen);
             }
@@ -4753,9 +4835,6 @@ function FlowApp({
 
     return () => {
       mounted = false;
-      if (tabLoadingTimer.current) {
-        clearTimeout(tabLoadingTimer.current);
-      }
     };
   }, [canUseRemote, firstRunTourPending, storageKey, todayTourSeenStorageKey, userId]);
 
@@ -4853,14 +4932,14 @@ function FlowApp({
   const selectedRitual = rituals.find((ritual) => ritual.id === selectedRitualId) ?? rituals[0];
   const editingRitual = editingRitualId ? rituals.find((ritual) => ritual.id === editingRitualId) ?? null : null;
   const todayCheckinIds = useMemo(
-    () => new Set(checkins.filter((checkin) => checkin.date === todayIso()).map((checkin) => checkin.ritualId)),
-    [checkins],
+    () => new Set(checkins.filter((checkin) => checkin.date === currentDate).map((checkin) => checkin.ritualId)),
+    [checkins, currentDate],
   );
   const pendingCheckinRituals = useMemo(
     () => rituals
-      .filter((ritual) => reminderWindowClosed(ritual) && !todayCheckinIds.has(ritual.id))
+      .filter((ritual) => reminderWindowClosed(ritual, currentTime) && !todayCheckinIds.has(ritual.id))
       .sort((a, b) => (a.id === selectedRitualId ? -1 : b.id === selectedRitualId ? 1 : 0)),
-    [rituals, selectedRitualId, todayCheckinIds],
+    [rituals, selectedRitualId, todayCheckinIds, currentTime],
   );
   const weeklyPatternCheckin = useMemo(() => {
     const start = new Date(`${todayIso()}T00:00:00`);
@@ -4916,11 +4995,11 @@ function FlowApp({
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => undefined);
   }, [settings.haptics]);
 
-  const persistCheckinsRemote = useCallback((records: RitualCheckin[]) => {
+  const persistCheckinsRemote = useCallback(async (records: RitualCheckin[]) => {
     if (!supabase || !canUseRemote || !userId || !records.length) {
       return;
     }
-    supabase
+    const { error } = await supabase
       .from('ritual_checkins')
       .upsert(
         records.map((record) => ({
@@ -4946,8 +5025,8 @@ function FlowApp({
           ai_advice: record.aiAdvice ?? null,
         })),
         { onConflict: 'id' },
-      )
-      .then(() => undefined);
+      );
+    if (error) throw new Error(cleanDatabaseError(error, 'Could not save your check-in. Please try again.'));
   }, [canUseRemote, userId]);
 
   const submitCheckin = useCallback(async (reason: string, ritualId?: string) => {
@@ -4973,7 +5052,7 @@ function FlowApp({
         streakProtected: reply.protect_streak,
         suggestedAction: reply.suggested_action,
         taskCategory: ritual.paletteKey,
-        plannedClosingTime: ritual.reminderTime ? dateFromReminderTime(ritual.reminderTime).toISOString() : undefined,
+        plannedClosingTime: ritual.reminderTime,
         reminderTime: ritual.reminderTime ? nextLateReminderDate(ritual.reminderTime).toISOString() : undefined,
         actualResponseTime: new Date().toISOString(),
         completionStatus: 'not_completed',
@@ -4984,8 +5063,13 @@ function FlowApp({
         resolvedAt: Date.now(),
       });
     }
-    setCheckins((current) => [...created, ...current]);
-    persistCheckinsRemote(created);
+    try {
+      await persistCheckinsRemote(created);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not save your check-in. Please try again.');
+      return;
+    }
+    setCheckins((current) => [...created, ...current.filter((item) => !created.some((next) => next.id === item.id))]);
     showToast('Flo check-in saved');
     impact();
   }, [checkins, impact, pendingCheckinRituals, persistCheckinsRemote, settings.floTone, showToast]);
@@ -5158,11 +5242,10 @@ function FlowApp({
     }
   };
 
-  const completeLateRitual = (ritual: Ritual) => {
+  const completeLateRitual = async (ritual: Ritual) => {
     if (ritual.doneToday) {
       return;
     }
-    toggleRitual(ritual.id, 0, 0);
     const record: RitualCheckin = {
       id: `late-completion-${ritual.id}-${todayIso()}`,
       ritualId: ritual.id,
@@ -5174,7 +5257,7 @@ function FlowApp({
       streakProtected: false,
       suggestedAction: 'Try completing it before the reminder next time.',
       taskCategory: ritual.paletteKey,
-      plannedClosingTime: ritual.reminderTime ? dateFromReminderTime(ritual.reminderTime).toISOString() : undefined,
+      plannedClosingTime: ritual.reminderTime,
       reminderTime: ritual.reminderTime ? nextLateReminderDate(ritual.reminderTime).toISOString() : undefined,
       actualResponseTime: new Date().toISOString(),
       completionStatus: 'completed_late',
@@ -5184,8 +5267,14 @@ function FlowApp({
       aiAdvice: 'Try to update the ritual before the closing time next time.',
       resolvedAt: Date.now(),
     };
+    try {
+      await persistCheckinsRemote([record]);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Could not save your check-in. Please try again.');
+      return;
+    }
+    toggleRitual(ritual.id, 0, 0);
     setCheckins((current) => [record, ...current]);
-    persistCheckinsRemote([record]);
     showToast(`Good job. ${ritual.name} marked completed late.`);
   };
 
@@ -5338,6 +5427,7 @@ function FlowApp({
 
     const remainingRituals = rituals.filter((ritual) => ritual.id !== ritualId);
     setRituals(remainingRituals);
+    setCheckins((current) => current.filter((checkin) => checkin.ritualId !== ritualId));
     setTotalActiveRituals((current) => Math.max(0, current - 1));
     if (selectedRitualId === ritualId) {
       setSelectedRitualId(remainingRituals[0]?.id ?? '');
@@ -5409,16 +5499,8 @@ function FlowApp({
     if (nextTab === activeTab) {
       return;
     }
-    if (tabLoadingTimer.current) {
-      clearTimeout(tabLoadingTimer.current);
-    }
-    setTabLoading(true);
     setActiveTab(nextTab);
-    tabLoadingTimer.current = setTimeout(() => {
-      setTabLoading(false);
-      tabLoadingTimer.current = null;
-    }, reduceMotion ? 40 : 140);
-  }, [activeTab, reduceMotion]);
+  }, [activeTab]);
 
   const generateInsight = (coachText?: string) => {
     if (!rituals.length) {
@@ -5511,8 +5593,8 @@ function FlowApp({
               newRitualId={newRitualId}
               reduceMotion={reduceMotion}
               onToggleRitual={toggleRitual}
-              onEditRitual={(ritual) => setEditingRitualId(ritual.id)}
-              onOpenProfile={() => setActiveTab('profile')}
+              onEditRitual={editRitual}
+              onOpenProfile={openProfile}
               onSubmitCheckin={submitCheckin}
             />
           ) : null}
@@ -5545,14 +5627,6 @@ function FlowApp({
           ) : null}
         </Animated.View>
 
-        {tabLoading ? (
-          <View pointerEvents="none" style={styles.tabLoadingOverlay}>
-            <View style={styles.tabLoadingPill}>
-              <MatrixLoader reduceMotion={reduceMotion} color={colors.blue1} compact />
-            </View>
-          </View>
-        ) : null}
-
         <BottomNav activeTab={activeTab} bottomInset={insets.bottom} onChange={changeTab} onAdd={() => setAddOpen(true)} />
         <AskFloLauncher userId={userId} bottomInset={insets.bottom} topInset={insets.top} reduceMotion={reduceMotion} onOpen={() => setCoachOpen(true)} />
         <CoachChatSheet
@@ -5569,9 +5643,9 @@ function FlowApp({
             const ritual = rituals.find((item) => item.id === ritualId);
             if (!ritual) {
               showToast('Ritual not found');
-              return;
+              throw new Error('Ritual not found');
             }
-            updateRitual(ritualId, {
+            return updateRitual(ritualId, {
               name: ritual.name,
               icon: ritual.icon,
               paletteKey: ritual.paletteKey,
@@ -5579,7 +5653,7 @@ function FlowApp({
               goalAmount: ritual.goalAmount,
               goalUnit: ritual.goalUnit,
               reminderTime,
-            }).catch(() => undefined);
+            });
           }}
         />
         <AddRitualSheet
@@ -5622,7 +5696,7 @@ function FlowApp({
   );
 }
 
-function TodayScreen({
+const TodayScreen = React.memo(function TodayScreen({
   username,
   rituals,
   totalActiveRituals,
@@ -5730,7 +5804,30 @@ function TodayScreen({
   };
 
   return (
-    <ScrollView contentContainerStyle={styles.screenScroll} showsVerticalScrollIndicator={false}>
+    <FlatList
+      key={useTabletGrid ? 'tablet' : 'phone'}
+      data={rituals}
+      numColumns={useTabletGrid ? 3 : 2}
+      keyExtractor={ritualKey}
+      contentContainerStyle={styles.screenScroll}
+      columnWrapperStyle={styles.ritualListRow}
+      showsVerticalScrollIndicator={false}
+      initialNumToRender={6}
+      maxToRenderPerBatch={6}
+      windowSize={5}
+      removeClippedSubviews={false}
+      renderItem={({ item: ritual }) => (
+        <RitualCard
+          ritual={ritual}
+          entering={ritual.id === newRitualId}
+          reduceMotion={reduceMotion}
+          cellStyle={styles.ritualListCell}
+          onEdit={onEditRitual}
+          onToggle={onToggleRitual}
+        />
+      )}
+      ListEmptyComponent={<EmptyCard title="No rituals yet" body="Create your first ritual to start tracking today." icon="+" />}
+      ListHeaderComponent={<>
       <View style={styles.topRow}>
         <Pressable accessibilityRole="button" accessibilityLabel="Open profile" onPress={onOpenProfile} style={styles.avatar}>
           <LogoMark size={42} reduceMotion={reduceMotion} style={styles.logoMarkInline} />
@@ -5776,26 +5873,8 @@ function TodayScreen({
         <Text style={styles.sectionMeta}>{totalActiveRituals} active</Text>
       </View>
 
-      <View style={styles.ritualGrid}>
-        {rituals.length ? (
-          rituals.map((ritual) => (
-            <RitualCard
-              key={ritual.id}
-              ritual={ritual}
-              entering={ritual.id === newRitualId}
-              reduceMotion={reduceMotion}
-              cellStyle={useTabletGrid && styles.ritualCellTablet}
-              onEdit={onEditRitual}
-              onToggle={onToggleRitual}
-            />
-          ))
-        ) : (
-          <View style={styles.fullWidth}>
-            <EmptyCard title="No rituals yet" body="Create your first ritual to start tracking today." icon="💧" />
-          </View>
-        )}
-      </View>
-
+      </>}
+      ListFooterComponent={<>
       {statusRows.length ? (
         <>
           <View style={styles.sectionHead}>
@@ -5818,11 +5897,16 @@ function TodayScreen({
           </View>
         </>
       ) : null}
-    </ScrollView>
+      </>}
+    />
   );
+});
+
+function ritualKey(ritual: Ritual) {
+  return ritual.id;
 }
 
-function AdaptiveTodayHero({
+const AdaptiveTodayHero = React.memo(function AdaptiveTodayHero({
   doneCount,
   totalActiveRituals,
   heroPercent,
@@ -5918,7 +6002,7 @@ function AdaptiveTodayHero({
       </View>
     </View>
   );
-}
+});
 
 function HeroAmbientScene({ themeKey, reduceMotion }: { themeKey: HeroThemeKey; reduceMotion: boolean }) {
   const sunTop = themeKey === 'morning' ? 86 : themeKey === 'afternoon' ? 54 : 136;
@@ -6376,9 +6460,28 @@ function FloCheckinCard({
 }) {
   const [customOpen, setCustomOpen] = useState(false);
   const [customReason, setCustomReason] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const savingRef = useRef(false);
   const latestToday = latestCheckins.find((checkin) => checkin.date === todayIso());
   const activeRitual = rituals[0];
   const quickReplies = ['I was studying', 'Office work ran late', 'Party or hangout', 'Social scrolling'];
+  const save = async (action: () => void | Promise<void>) => {
+    if (savingRef.current) return false;
+    savingRef.current = true;
+    setSaving(true);
+    setSaveError('');
+    try {
+      await action();
+      return true;
+    } catch (error) {
+      setSaveError(readableErrorMessage(error) || 'Could not save. Please try again.');
+      return false;
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  };
 
   if (!rituals.length && !latestToday) {
     return null;
@@ -6396,7 +6499,7 @@ function FloCheckinCard({
     if (!trimmed) {
       return;
     }
-    await onSubmit(trimmed, activeRitual?.id);
+    if (!await save(() => onSubmit(trimmed, activeRitual?.id))) return;
     setCustomReason('');
     setCustomOpen(false);
   };
@@ -6417,7 +6520,7 @@ function FloCheckinCard({
         <>
           <Text style={styles.floQuestion}>{activeRitual?.name} was not marked complete after its reminder window. Did you complete it late?</Text>
           <View style={styles.floChipRow}>
-            <Pressable accessibilityRole="button" onPress={() => activeRitual && onCompleteLate(activeRitual)} style={styles.floReplyChip}>
+            <Pressable accessibilityRole="button" disabled={saving} onPress={() => activeRitual && save(() => onCompleteLate(activeRitual))} style={styles.floReplyChip}>
               <Text style={styles.floReplyText}>Yes, I completed it</Text>
             </Pressable>
             <Pressable accessibilityRole="button" onPress={() => setCustomOpen(true)} style={styles.floReplyChip}>
@@ -6427,7 +6530,7 @@ function FloCheckinCard({
           <Text style={styles.floQuestion}>Why was it delayed?</Text>
           <View style={styles.floChipRow}>
             {quickReplies.map((reply) => (
-              <Pressable key={reply} accessibilityRole="button" onPress={() => onSubmit(reply, activeRitual?.id)} style={styles.floReplyChip}>
+              <Pressable key={reply} accessibilityRole="button" disabled={saving} onPress={() => save(() => onSubmit(reply, activeRitual?.id))} style={styles.floReplyChip}>
                 <Text style={styles.floReplyText}>{reply}</Text>
               </Pressable>
             ))}
@@ -6439,12 +6542,13 @@ function FloCheckinCard({
             <View style={styles.floInputRow}>
               <TextInput
                 value={customReason}
+                maxLength={2000}
                 onChangeText={setCustomReason}
                 placeholder="Tell Flo what happened"
                 placeholderTextColor={colors.inkFaint}
                 style={styles.floInput}
               />
-              <Pressable accessibilityRole="button" onPress={submitCustom} style={styles.floSendButton}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Save check-in" disabled={saving || !customReason.trim()} onPress={submitCustom} style={styles.floSendButton}>
                 <Send size={15} color="#FFFFFF" strokeWidth={2.5} />
               </Pressable>
             </View>
@@ -6452,14 +6556,16 @@ function FloCheckinCard({
         </>
       ) : null}
 
+      {saving ? <Text style={styles.floInlineText}>Saving your check-in...</Text> : null}
+      {saveError ? <Text accessibilityRole="alert" style={styles.floInlineText}>{saveError}</Text> : null}
       {latestToday ? (
         <View style={styles.floInlineReply}>
           <Text style={styles.floInlineLabel}>Flo</Text>
           <Text style={styles.floInlineText}>{latestToday.floMessage}</Text>
           {latestToday.suggestedAction ? (
-            <Pressable accessibilityRole="button" style={styles.floActionChip}>
+            <View style={styles.floActionChip}>
               <Text style={styles.floActionText}>{latestToday.suggestedAction}</Text>
-            </Pressable>
+            </View>
           ) : null}
         </View>
       ) : null}
@@ -6603,7 +6709,7 @@ function TimelineMarker({
   );
 }
 
-function RitualCard({
+const RitualCard = React.memo(function RitualCard({
   ritual,
   entering,
   reduceMotion,
@@ -6781,7 +6887,7 @@ function RitualCard({
       </Pressable>
     </Animated.View>
   );
-}
+});
 
 function RitualTimeBadge({
   completedAt,
@@ -7059,23 +7165,73 @@ function ProgressScreen({
   );
 }
 
-async function requestCoachReply(message: string, history: CoachMessage[], rituals: Ritual[], checkins: RitualCheckin[] = []) {
+function buildCoachRequestContext(rituals: Ritual[], checkins: RitualCheckin[] = []) {
+  const compactRituals = rituals.map((ritual) => {
+    const { completions, totalDays, completionRate } = ritualMetrics(ritual);
+    return {
+      ritualId: ritual.id,
+      name: ritual.name,
+      completionRate,
+      completions,
+      totalDays,
+      longestStreak: ritual.bestStreakDays,
+      currentStreak: ritual.streakDays,
+      streakBeforeToday: ritual.doneToday ? Math.max(0, ritual.streakDays - 1) : ritual.streakDays,
+      completedToday: ritual.doneToday,
+      reminderTime: ritual.reminderTime ?? null,
+      last7Days: ritual.weekly,
+      why: ritual.why,
+      goalAmount: ritual.goalAmount,
+      goalUnit: ritual.goalUnit,
+    };
+  });
+  const recentCheckins = checkins.slice(0, 8).map((checkin) => ({
+    ritual_id: checkin.ritualId,
+    checkin_date: checkin.date,
+    user_reason_raw: checkin.userReasonRaw,
+    completion_status: checkin.completionStatus,
+    completed_late: checkin.completedLate,
+    ai_reason_category: checkin.aiReasonCategory,
+    ai_reason_summary: checkin.aiReasonSummary,
+    ai_advice: checkin.aiAdvice,
+    task_category: checkin.taskCategory,
+  }));
+  return {
+    summary: {
+      rituals: compactRituals,
+      recentlyBrokenStreaks: [],
+    },
+    summaryWindow: { start: isoDaysBack(30)[0] ?? todayIso(), end: todayIso() },
+    rituals: compactRituals.map((ritual) => ({
+      id: ritual.ritualId,
+      name: ritual.name,
+      reminder_time: ritual.reminderTime,
+    })),
+    recentCheckins,
+  };
+}
+
+async function requestCoachReply(message: string, history: CoachMessage[], rituals: Ritual[], checkins: RitualCheckin[] = [], signal?: AbortSignal): Promise<CoachReply> {
   if (supabase) {
     try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return offlineCoachReply(message, rituals);
       const { data, error } = await supabase.functions.invoke('coach-chat', {
+        timeout: 10000,
+        signal,
         body: {
           message,
-          conversationHistory: history.map((item) => ({ role: item.role, text: item.text })),
+          conversationHistory: history.filter((item) => !item.pending).slice(-10).map((item) => ({ role: item.role, text: item.text.slice(0, 4000) })),
+          clientContext: buildCoachRequestContext(rituals, checkins),
         },
       });
-      if (!error && data?.text) {
-        return data as { text: string; insightCard?: CoachInsightCard; suggestedActions?: CoachAction[] };
-      }
+      const reply = !error ? parseCoachReply(data, rituals) : null;
+      if (reply) return reply;
     } catch {
       // Fall back to local, real in-memory ritual data when the network or function is unavailable.
     }
   }
-  return buildLocalCoachReply(message, rituals, checkins);
+  return { ...offlineCoachReply(message, rituals), source: 'offline' };
 }
 
 type ReportExportSource = {
@@ -7088,7 +7244,7 @@ async function generateAndShareReport(intervalDays: FlowSettings['reportInterval
   let report: Record<string, unknown> | null = null;
   if (supabase) {
     try {
-      const { data, error } = await supabase.functions.invoke('generate-report', { body: { intervalDays, timeZone } });
+      const { data, error } = await supabase.functions.invoke('generate-report', { timeout: 20000, body: { intervalDays, timeZone, force: true } });
       if (!error && data) {
         report = data as Record<string, unknown>;
       }
@@ -7285,81 +7441,10 @@ function formatReportDayLabel(iso: string) {
   return date ? date.toLocaleDateString(undefined, { weekday: 'short' }) : iso;
 }
 
-function buildLocalCoachReply(message: string, rituals: Ritual[], checkins: RitualCheckin[] = []): { text: string; insightCard?: CoachInsightCard; suggestedActions?: CoachAction[] } {
-  if (!rituals.length) {
-    return {
-      text: 'Create your first ritual and I can start coaching from your real completion data.',
-      suggestedActions: [{ id: 'new-water', label: 'Add a 2-minute water ritual', type: 'suggest_new_ritual', payload: { name: 'Water break', icon: '💧' } }],
-    };
-  }
-  const sorted = [...rituals].sort((a, b) => percentFromWeekly(b.weekly) - percentFromWeekly(a.weekly));
-  const strongest = sorted[0];
-  const weakest = sorted[sorted.length - 1];
-  const strongestRate = percentFromWeekly(strongest.weekly);
-  const weakestRate = percentFromWeekly(weakest.weekly);
-  const broken = rituals.find((ritual) => !ritual.doneToday && ritual.streakDays >= 3);
-  const lower = message.toLowerCase();
-  const asksAboutDelay = /miss|missed|incomplete|not complete|not done|late|delay|delayed|why|reason|study|studying|office|work|party|hangout|club|scroll|travel/.test(lower);
-
-  if (asksAboutDelay) {
-    const latestRelevant = checkins.find((checkin) => checkin.completionStatus === 'not_completed' || checkin.aiReasonCategory);
-    const target = latestRelevant
-      ? rituals.find((ritual) => ritual.id === latestRelevant.ritualId) ?? weakest
-      : rituals.find((ritual) => !ritual.doneToday && reminderWindowClosed(ritual)) ?? broken ?? weakest;
-    const classified = latestRelevant?.aiReasonCategory
-      ? { category: latestRelevant.aiReasonCategory, keyword: classifyReasonText(latestRelevant.userReasonRaw).keyword, summary: latestRelevant.aiReasonSummary ?? classifyReasonText(latestRelevant.userReasonRaw).summary }
-      : classifyReasonText(message);
-    const recovery = classified.category === 'valid_reason'
-      ? `${classified.keyword} is productive protected time. Move ${target.name} 30, 60, or 90 minutes later today, or reduce the target so the day still counts honestly.`
-      : classified.category === 'avoidable_distraction'
-        ? `${classified.keyword} is an avoidable time leak. Do a 2-minute version of ${target.name} now, then keep parties, hangouts, scrolling, or entertainment after the ritual.`
-        : `I need the exact blocker before judging it. Was it study/work/health/family, or was it entertainment, hangout, scrolling, or leisure travel?`;
-    return {
-      text: `${target.name} was not completed in its reminder window. ${latestRelevant ? `Last saved reason: "${latestRelevant.userReasonRaw}". ` : ''}${recovery}`,
-      insightCard: {
-        headline: `${target.name}: ${classified.keyword}`,
-        body: classified.summary,
-        bars: target.weekly,
-        metric: `${percentFromWeekly(target.weekly)}% weekly completion`,
-      },
-      suggestedActions: [{ id: `reschedule-${target.id}`, label: `Move ${target.name} reminder 60 minutes later`, type: 'reschedule_reminder', payload: { ritualId: target.id, reminderTime: addMinutesToTime(target.reminderTime, 60) } }],
-    };
-  }
-
-  if (lower.includes('break') || lower.includes('streak')) {
-    const target = broken ?? weakest;
-    return {
-      text: `${target.name} is the ritual to inspect. Its current streak is ${target.streakDays} days and this week is ${percentFromWeekly(target.weekly)}% complete, so the next best move is a smaller cue today.`,
-      insightCard: {
-        headline: `${target.name} needs a tighter cue.`,
-        body: `${target.name} has ${target.weekly.reduce((sum, value) => sum + value, 0)}/7 completions this week. That concrete miss pattern is why I would move it earlier.`,
-        bars: target.weekly,
-        metric: `${percentFromWeekly(target.weekly)}% weekly completion`,
-      },
-      suggestedActions: [{ id: `reschedule-${target.id}`, label: `Move ${target.name} reminder 60 minutes later`, type: 'reschedule_reminder', payload: { ritualId: target.id, reminderTime: addMinutesToTime(target.reminderTime, 60) } }],
-    };
-  }
-
-  if (lower.includes('suggest')) {
-    return {
-      text: `Based on ${strongest.name} at ${strongestRate}% this week, add one tiny ritual immediately after it. Keep it under two minutes so it does not compete with your current streak.`,
-      suggestedActions: [{ id: 'suggest-breath', label: 'Add 2-minute breathing', type: 'suggest_new_ritual', payload: { name: '2-minute breathing', icon: '🧘' } }],
-    };
-  }
-
-  return {
-    text: `${strongest.name} is your strongest ritual at ${strongestRate}% this week. ${weakest.name} is the lowest at ${weakestRate}%, so your best next action is to anchor ${weakest.name} after ${strongest.name}.`,
-    insightCard: {
-      headline: `${strongest.name} is carrying the week.`,
-      body: `${strongest.name}: ${strongestRate}% completion. ${weakest.name}: ${weakestRate}% completion. That gap is the reason for the anchor suggestion.`,
-      bars: strongest.weekly,
-      metric: `${strongestRate}% completion`,
-    },
-    suggestedActions: [{ id: 'weekly-recap', label: 'Generate weekly recap', type: 'generate_weekly_recap' }],
-  };
-}
 
 function CoachScreen({
+  messages,
+  setMessages,
   rituals,
   pendingCheckinRituals = [],
   latestCheckins = [],
@@ -7370,6 +7455,8 @@ function CoachScreen({
   onRescheduleRitual,
   sheet = false,
 }: {
+  messages: CoachMessage[];
+  setMessages: React.Dispatch<React.SetStateAction<CoachMessage[]>>;
   rituals: Ritual[];
   pendingCheckinRituals?: Ritual[];
   latestCheckins?: RitualCheckin[];
@@ -7380,103 +7467,87 @@ function CoachScreen({
   onRescheduleRitual?: (ritualId: string, reminderTime: string) => void | Promise<void>;
   sheet?: boolean;
 }) {
-  const [messages, setMessages] = useState<CoachMessage[]>(() => [
-    {
-      id: 'welcome',
-      role: 'assistant',
-      text: rituals.length
-        ? `I know your current rituals and can reason from their tracked metrics. Ask how this week is going.`
-        : 'Create your first ritual, then I can coach from your real data.',
-    },
-  ]);
   const [composer, setComposer] = useState('');
   const [loading, setLoading] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [selectedQuickReply, setSelectedQuickReply] = useState<string | null>(null);
+  const busy = useRef(false);
+  const request = useRef<AbortController | null>(null);
   const listRef = useRef<FlatList<CoachMessage>>(null);
   const quickReplies = useMemo(() => {
-    const replies = ['How am I doing this week?', 'Suggest a new ritual'];
-    const broken = rituals.some((ritual) => !ritual.doneToday && ritual.streakDays >= 3);
-    return broken ? ['Why did I break my streak?', ...replies] : replies;
+    const next = rituals.find((ritual) => !ritual.doneToday);
+    return [next ? `Help me start ${next.name}` : 'Plan my tomorrow', 'How am I doing this week?', 'Suggest a new ritual'];
   }, [rituals]);
 
   useEffect(() => {
-    setTimeout(() => listRef.current?.scrollToEnd({ animated: !reduceMotion }), 60);
+    const timer = setTimeout(() => listRef.current?.scrollToEnd({ animated: !reduceMotion }), 60);
+    return () => clearTimeout(timer);
   }, [messages, reduceMotion]);
+
+  useEffect(() => () => { request.current?.abort(); }, []);
 
   const sendMessage = async (text: string) => {
     const trimmed = text.trim();
-    if (!trimmed || loading) {
+    if (!trimmed || busy.current) {
       return;
     }
+    busy.current = true;
+    const controller = new AbortController();
+    request.current = controller;
     const userMessage: CoachMessage = { id: `user-${Date.now()}`, role: 'user', text: trimmed };
     const pendingId = `assistant-${Date.now()}`;
     setComposer('');
+    setSelectedQuickReply(trimmed);
     setLoading(true);
     setMessages((current) => [...current, userMessage, { id: pendingId, role: 'assistant', text: '', pending: true }]);
 
-    const response = await requestCoachReply(trimmed, [...messages, userMessage], rituals, latestCheckins).catch(() => ({
-      text: 'I could not reach the coach endpoint. I can still help once Supabase is configured.',
-    }));
-
-    if (reduceMotion) {
-      setMessages((current) => current.map((item) => (item.id === pendingId ? { ...item, ...response, pending: false } : item)));
+    try {
+      const response = await requestCoachReply(trimmed, messages, rituals, latestCheckins, controller.signal);
+      setMessages((current) => current.map((item) => item.id === pendingId
+        ? { ...item, ...response, pending: false } : item));
+    } finally {
+      busy.current = false;
+      request.current = null;
       setLoading(false);
-      return;
+      setSelectedQuickReply(null);
     }
-
-    const words = response.text.split(' ');
-    let index = 0;
-    const tick = () => {
-      index += 1;
-      setMessages((current) =>
-        current.map((item) =>
-          item.id === pendingId
-            ? { ...item, text: words.slice(0, index).join(' '), pending: index < words.length }
-            : item,
-        ),
-      );
-      if (index < words.length) {
-        setTimeout(tick, 28);
-      } else {
-        setMessages((current) =>
-          current.map((item) =>
-            item.id === pendingId
-              ? { ...item, ...response, pending: false }
-              : item,
-          ),
-        );
-        setLoading(false);
-      }
-    };
-    tick();
   };
 
-  const confirmAction = (action: CoachAction) => {
+  const confirmAction = async (action: CoachAction, messageId: string) => {
+    if (busy.current) return;
+    busy.current = true;
+    setActionBusy(true);
+    try {
+    let confirmation: CoachReply;
     if (action.type === 'suggest_new_ritual') {
       const name = typeof action.payload?.name === 'string' ? action.payload.name : 'New ritual';
       const icon = typeof action.payload?.icon === 'string' ? action.payload.icon : '🎯';
-      Promise.resolve(onAddRitual(name, icon)).catch(() => undefined);
-      setMessages((current) => [
-        ...current,
-        { id: `confirm-${Date.now()}`, role: 'assistant', text: `${name} was added after your confirmation.` },
-      ]);
-      return;
-    }
-    if (action.type === 'reschedule_reminder') {
+      if (rituals.some((ritual) => ritual.name.toLowerCase() === name.toLowerCase())) {
+        throw new Error(`${name} is already in your rituals.`);
+      }
+      await onAddRitual(name, icon);
+      confirmation = { text: `${name} was added. What would make it easy to start today?` };
+    } else if (action.type === 'reschedule_reminder') {
       const ritualId = typeof action.payload?.ritualId === 'string' ? action.payload.ritualId : '';
       const reminderTime = typeof action.payload?.reminderTime === 'string' ? action.payload.reminderTime : '';
-      if (ritualId && isValidReminderTime(reminderTime) && onRescheduleRitual) {
-        Promise.resolve(onRescheduleRitual(ritualId, reminderTime)).catch(() => undefined);
-        setMessages((current) => [
-          ...current,
-          { id: `confirm-${Date.now()}`, role: 'assistant', text: `Confirmed: ${action.label}. Reminder moved to ${formatReminderTime(reminderTime)}.` },
-        ]);
-        return;
+      if (!rituals.some((ritual) => ritual.id === ritualId) || !isValidReminderTime(reminderTime) || !onRescheduleRitual) {
+        throw new Error('This reminder could not be changed. Open the ritual to choose a time.');
       }
+      await onRescheduleRitual(ritualId, reminderTime);
+      confirmation = { text: `Reminder moved to ${formatReminderTime(reminderTime)}.` };
+    } else {
+      confirmation = await requestCoachReply('Generate weekly recap', messages, rituals, latestCheckins);
     }
     setMessages((current) => [
-      ...current,
-      { id: `confirm-${Date.now()}`, role: 'assistant', text: `Confirmed: ${action.label}. This will write to Supabase after you connect the backend mutation.` },
+      ...current.map((item) => item.id === messageId ? { ...item, suggestedActions: item.suggestedActions?.filter((suggestion) => suggestion.id !== action.id) } : item),
+      { id: `confirm-${Date.now()}`, role: 'assistant', ...confirmation },
     ]);
+    } catch (error) {
+      setMessages((current) => [...current, { id: `action-error-${Date.now()}`, role: 'assistant', text: readableErrorMessage(error) || 'Could not save that change. Please try again.' }]);
+    } finally {
+      busy.current = false;
+      setActionBusy(false);
+    }
   };
 
   return (
@@ -7487,7 +7558,7 @@ function CoachScreen({
           <Text style={styles.coachTitle}>Coach</Text>
           <View style={styles.coachStatusRow}>
             <View style={styles.coachStatusDot} />
-            <Text style={styles.coachStatus}>Knows your last 30 days</Text>
+            <Text style={styles.coachStatus}>{loading ? 'Thinking...' : actionBusy ? 'Saving...' : 'Your rituals, goals and progress'}</Text>
           </View>
         </View>
       </View>
@@ -7510,14 +7581,21 @@ function CoachScreen({
           ) : null
         }
         renderItem={({ item }) => (
-          <CoachBubble message={item} reduceMotion={reduceMotion} onConfirmAction={confirmAction} />
+          <CoachBubble message={item} reduceMotion={reduceMotion} actionBusy={loading || actionBusy} onConfirmAction={(action) => { void confirmAction(action, item.id); }} />
         )}
       />
 
       <View style={styles.quickReplyWrap}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.quickReplyScroll} contentContainerStyle={styles.quickReplyRow}>
           {quickReplies.map((reply) => (
-            <Pressable key={reply} onPress={() => sendMessage(reply)} style={styles.quickReplyChip}>
+            <Pressable
+              key={reply}
+              accessibilityRole="button"
+              accessibilityState={{ selected: selectedQuickReply === reply, busy: selectedQuickReply === reply && loading }}
+              disabled={loading || actionBusy}
+              onPress={() => sendMessage(reply)}
+              style={[styles.quickReplyChip, selectedQuickReply === reply && styles.quickReplyChipSelected]}
+            >
               <Text numberOfLines={1} style={styles.quickReplyText}>{reply}</Text>
             </Pressable>
           ))}
@@ -7527,6 +7605,8 @@ function CoachScreen({
       <View style={styles.composerRow}>
         <TextInput
           value={composer}
+          maxLength={2000}
+          accessibilityLabel="Message Flo"
           onChangeText={setComposer}
           placeholder="Ask about your habits..."
           placeholderTextColor={colors.inkFaint}
@@ -7534,7 +7614,7 @@ function CoachScreen({
           returnKeyType="send"
           onSubmitEditing={() => sendMessage(composer)}
         />
-        <PressScale reduceMotion={reduceMotion} onPress={() => sendMessage(composer)} style={styles.sendButton}>
+        <PressScale accessibilityLabel="Send message" disabled={loading || actionBusy || !composer.trim()} reduceMotion={reduceMotion} onPress={() => sendMessage(composer)} style={styles.sendButton}>
           <Send size={20} color="#FFFFFF" strokeWidth={2.5} />
         </PressScale>
       </View>
@@ -7545,10 +7625,12 @@ function CoachScreen({
 function CoachBubble({
   message,
   reduceMotion,
+  actionBusy,
   onConfirmAction,
 }: {
   message: CoachMessage;
   reduceMotion: boolean;
+  actionBusy: boolean;
   onConfirmAction: (action: CoachAction) => void;
 }) {
   const enter = useSharedValue(reduceMotion ? 1 : 0);
@@ -7572,9 +7654,10 @@ function CoachBubble({
         ) : (
           <Text style={assistant ? styles.aiBubbleText : styles.userBubbleText}>{message.text}</Text>
         )}
+        {message.source === 'offline' ? <Text style={styles.coachInsightLabel}>Offline guidance</Text> : null}
         {message.insightCard ? <CoachInsightCardView card={message.insightCard} /> : null}
         {message.suggestedActions?.map((action) => (
-          <Pressable key={action.id} onPress={() => onConfirmAction(action)} style={styles.actionConfirm}>
+          <Pressable key={action.id} accessibilityRole="button" disabled={actionBusy} onPress={() => onConfirmAction(action)} style={styles.actionConfirm}>
             <Text style={styles.actionConfirmText}>{action.label}? Confirm</Text>
           </Pressable>
         ))}
@@ -7635,6 +7718,20 @@ function InsightsScreen({
   const strongest = bestRitual(rituals);
   const weakest = weakestRitual(rituals);
   const reportOptions: FlowSettings['reportIntervalDays'][] = [1, 7, 10, 15, 30];
+  const insightStats = useMemo(() => {
+    const weekStart = isoDaysBack(7)[0] ?? todayIso();
+    const recent = checkins.filter((checkin) => checkin.date >= weekStart);
+    const avoidable = recent.filter((checkin) => checkin.aiReasonCategory === 'avoidable_distraction').length;
+    const valid = recent.filter((checkin) => checkin.aiReasonCategory === 'valid_reason').length;
+    const late = recent.filter((checkin) => checkin.completedLate || checkin.completionStatus === 'completed_late').length;
+    const latest = recent[0];
+    return {
+      avoidable,
+      valid,
+      late,
+      latestReason: latest?.aiReasonSummary || latest?.userReasonRaw || '',
+    };
+  }, [checkins]);
 
   useEffect(() => {
     setSelectedReportDays(reportIntervalDays);
@@ -7650,7 +7747,7 @@ function InsightsScreen({
     }
     setLoading(true);
     requestCoachReply('Generate weekly recap', [], rituals, checkins).then((response) => {
-      onGenerate(response.insightCard?.body ?? response.text);
+      onGenerate(response.text);
       setLoading(false);
     }).catch(() => {
       onGenerate();
@@ -7707,7 +7804,11 @@ function InsightsScreen({
       <LinearGradient colors={['#4FA8FF', '#7A79FF']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.insightCta}>
         <Text style={styles.insightSpark}>✨</Text>
         <Text style={styles.insightTitle}>Generate this week's insight</Text>
-        <Text style={styles.insightBody}>The production path is Supabase Edge Function to Claude, cached per week. This build computes from local habit logs.</Text>
+        <Text style={styles.insightBody}>
+          {insightStats.latestReason
+            ? `Latest signal: ${insightStats.latestReason}`
+            : 'Flo will use your latest rituals, streaks, and check-ins to find the next best adjustment.'}
+        </Text>
         <Pressable accessibilityRole="button" onPress={generate} style={styles.insightButton}>
           <SpinIcon loading={loading} reduceMotion={reduceMotion} />
           <Text style={styles.insightButtonText}>{insight ? 'Regenerate insight' : 'Generate insight'}</Text>
@@ -7716,7 +7817,7 @@ function InsightsScreen({
 
       <Animated.View style={[loading && { opacity: 0.4 }]}>
         {insight ? (
-          <EmptyCard title="Your streaks run hottest before 9am" body={insight} icon="✨" solid />
+          <EmptyCard title="Latest coaching note" body={insight} icon="✨" solid />
         ) : (
           <EmptyCard title="No insight yet" body="Tap generate to build the weekly coaching card." icon="💧" />
         )}
@@ -7728,9 +7829,9 @@ function InsightsScreen({
             <Text style={styles.sectionTitle}>Patterns noticed</Text>
           </View>
           <View style={styles.patternCard}>
-            <PatternRow icon={Clock3} title="Best time" body="Your strongest completion window will appear after tracking." palette={habitPalette.water} />
+            <PatternRow icon={Clock3} title="Recovery speed" body={insightStats.late ? `${insightStats.late} late completion${insightStats.late === 1 ? '' : 's'} logged this week.` : 'No late completions logged this week.'} palette={habitPalette.water} />
             <PatternRow icon={Zap} title="Stacking effect" body={`${strongest?.name ?? 'A strong ritual'} is the best anchor for a new ritual.`} palette={habitPalette.reading} />
-            <PatternRow icon={CalendarDays} title="Weekend rhythm" body={`${weakest?.name ?? 'One ritual'} needs the most consistency this week.`} palette={habitPalette.focus} />
+            <PatternRow icon={CalendarDays} title="Time protection" body={`${insightStats.valid} productive reason${insightStats.valid === 1 ? '' : 's'} and ${insightStats.avoidable} avoidable distraction${insightStats.avoidable === 1 ? '' : 's'} recorded.`} palette={habitPalette.focus} />
           </View>
         </>
       ) : (
@@ -7987,6 +8088,7 @@ function LiquidRing({
         toValue: -liquidSize,
         duration: 3400,
         easing: Easing.linear,
+        isInteraction: false,
         useNativeDriver: Platform.OS !== 'web',
       }),
       { resetBeforeIteration: true },
@@ -8679,7 +8781,7 @@ function AskFloLauncher({
     const minX = edgePadding;
     const minY = Math.max(topInset + edgePadding, edgePadding);
     const maxX = Math.max(minX, width - launcherWidth - edgePadding);
-    const navBottom = Platform.OS === 'android' ? 24 : Math.max(20, bottomInset + 8);
+    const navBottom = Math.max(8, bottomInset + 8);
     const navTop = height - navBottom - 76;
     const maxY = Math.max(minY, navTop - ASK_FLO_NAV_GAP - ASK_FLO_HEIGHT);
     return { minX, minY, maxX, maxY };
@@ -8687,16 +8789,14 @@ function AskFloLauncher({
 
   const snapToCorner = useCallback((rawX: number, rawY: number) => {
     const clampedX = clamp(rawX, bounds.minX, bounds.maxX);
-    const clampedY = clamp(rawY, bounds.minY, bounds.maxY);
     const finalX = clampedX <= (bounds.minX + bounds.maxX) / 2 ? bounds.minX : bounds.maxX;
-    const finalY = clampedY <= (bounds.minY + bounds.maxY) / 2 ? bounds.minY : bounds.maxY;
-    return { x: finalX, y: finalY };
+    return { x: finalX, y: bounds.maxY };
   }, [bounds.maxX, bounds.maxY, bounds.minX, bounds.minY]);
 
   const isSavedNearCorner = useCallback((x: number, y: number) => {
     const near = (value: number, target: number) => Math.abs(value - target) <= 36;
-    return (near(x, bounds.minX) || near(x, bounds.maxX)) && (near(y, bounds.minY) || near(y, bounds.maxY));
-  }, [bounds.maxX, bounds.maxY, bounds.minX, bounds.minY]);
+    return (near(x, bounds.minX) || near(x, bounds.maxX)) && near(y, bounds.maxY);
+  }, [bounds.maxX, bounds.maxY, bounds.minX]);
 
   useEffect(() => {
     let mounted = true;
@@ -8843,6 +8943,7 @@ function CoachChatSheet({
   onAddRitual: (name: string, icon: string) => void | Promise<void>;
   onRescheduleRitual: (ritualId: string, reminderTime: string) => void | Promise<void>;
 }) {
+  const [messages, setMessages] = useState<CoachMessage[]>([{ id: 'welcome', role: 'assistant', text: 'What would you like to work on today? We can plan your next ritual, look at your progress, or make a difficult habit easier.' }]);
   const insets = useSafeAreaInsets();
   const { height, width } = useWindowDimensions();
   const isTablet = width >= TABLET_MIN_WIDTH;
@@ -8881,6 +8982,8 @@ function CoachChatSheet({
               <X size={18} color={colors.ink} strokeWidth={2.5} />
             </Pressable>
             <CoachScreen
+              messages={messages}
+              setMessages={setMessages}
               rituals={rituals}
               pendingCheckinRituals={pendingCheckinRituals}
               latestCheckins={latestCheckins}
@@ -8923,7 +9026,7 @@ function BottomNav({
   const navSideOffset = width >= TABLET_MIN_WIDTH
     ? Math.max(24, (width - NAV_TABLET_MAX_WIDTH) / 2)
     : 14;
-  const navBottom = Platform.OS === 'android' ? 24 : Math.max(20, bottomInset + 8);
+  const navBottom = Math.max(8, bottomInset + 8);
   const clampedNavWidth = Math.min(navWidth, width - navSideOffset * 2);
   useEffect(() => {
     Animated.timing(mounted, {
@@ -9110,7 +9213,7 @@ function AddRitualSheet({
     : undefined;
   const sheetMaxHeight = isTablet
     ? Math.min(640, height - insets.top - insets.bottom - 48)
-    : height - insets.top - 16;
+    : Math.min(height * 0.84, height - insets.top - 24);
   const previewRitual: Ritual = {
     id: 'preview',
     name: previewName,
@@ -9284,8 +9387,16 @@ function AddRitualSheet({
           ]}
         >
           <ScrollView
+            style={styles.modalSheetScroll}
             keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator={false}
+            onScrollEndDrag={(event) => {
+              const { contentOffset, velocity } = event.nativeEvent;
+              if (!saving && contentOffset.y <= 0 && (velocity?.y ?? 0) > 0.8) {
+                onClose();
+              }
+            }}
+            scrollEventThrottle={16}
             contentContainerStyle={styles.modalSheetContent}
           >
           <View style={styles.modalHandle} />
@@ -9425,7 +9536,22 @@ function AddRitualSheet({
             <Pressable
               accessibilityRole="button"
               onPress={() => {
-                setTimePickerOpen(true);
+                if (Platform.OS === 'android') {
+                  DateTimePickerAndroid.open({
+                    mode: 'time',
+                    value: dateFromReminderTime(reminderTime ?? '20:00'),
+                    is24Hour: false,
+                    onValueChange: (_event, selectedDate) => {
+                      if (selectedDate) {
+                        setReminderTime(timeValueFromDate(selectedDate));
+                        setConfirmDelete(false);
+                      }
+                    },
+                    onDismiss: () => setTimePickerOpen(false),
+                  });
+                } else {
+                  setTimePickerOpen(true);
+                }
                 setConfirmDelete(false);
               }}
               style={[styles.reminderChip, reminderTime && !reminderPresets.some((preset) => preset.value === reminderTime) && styles.reminderChipSelected]}
@@ -9442,14 +9568,12 @@ function AddRitualSheet({
               value={dateFromReminderTime(reminderTime ?? '20:00')}
               display="default"
               onChange={(_, selectedDate) => {
-                if (Platform.OS === 'android') {
-                  setTimePickerOpen(false);
-                }
                 if (selectedDate) {
                   setReminderTime(timeValueFromDate(selectedDate));
                   setConfirmDelete(false);
                 }
               }}
+              onDismiss={() => setTimePickerOpen(false)}
             />
           ) : null}
 
@@ -11043,6 +11167,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  quickReplyChipSelected: {
+    borderColor: colors.blue1,
+    backgroundColor: 'rgba(79,168,255,0.12)',
+  },
   quickReplyText: {
     fontFamily: fontBodyBold,
     fontSize: 12.5,
@@ -11084,6 +11212,7 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     width: '100%',
     flex: 1,
+    backgroundColor: colors.page,
   },
   tabLoadingOverlay: {
     position: 'absolute',
@@ -11900,6 +12029,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 12,
+  },
+  ritualListRow: {
+    gap: 12,
+    marginBottom: 12,
+  },
+  ritualListCell: {
+    flex: 1,
+    minWidth: 0,
+    width: undefined,
   },
   fullWidth: {
     width: '100%',
@@ -13232,6 +13370,8 @@ const styles = StyleSheet.create({
   },
   modalSheet: {
     width: '100%',
+    minHeight: 0,
+    flexShrink: 1,
     alignSelf: 'center',
     backgroundColor: '#FFFFFF',
     borderTopLeftRadius: 28,
@@ -13250,6 +13390,9 @@ const styles = StyleSheet.create({
   },
   modalSheetContent: {
     paddingBottom: 4,
+  },
+  modalSheetScroll: {
+    flexShrink: 1,
   },
   modalHandle: {
     width: 36,

@@ -93,6 +93,9 @@ module.exports = ({ config }) => {
   const hasSharingConfig = plugins.some((plugin) => (
     Array.isArray(plugin) ? plugin[0] === 'expo-sharing' : plugin === 'expo-sharing'
   ));
+  const hasWebBrowserConfig = plugins.some((plugin) => (
+    Array.isArray(plugin) ? plugin[0] === 'expo-web-browser' : plugin === 'expo-web-browser'
+  ));
   const notificationPlugin = [
     'expo-notifications',
     {
@@ -121,6 +124,7 @@ module.exports = ({ config }) => {
       ? []
       : [notificationPlugin]),
     ...(hasSharingConfig ? [] : ['expo-sharing']),
+    ...(hasWebBrowserConfig ? [] : ['expo-web-browser']),
   ];
   const androidPermissions = Array.from(new Set([
     ...(config.android?.permissions ?? []),

@@ -21,22 +21,32 @@ export function useEntranceAnimation(trigger: string | number, reduceMotion: boo
   const progress = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
+    if (reduceMotion) {
+      progress.setValue(1);
+      return;
+    }
     progress.setValue(0);
-    Animated.timing(progress, {
+    const animation = Animated.timing(progress, {
       toValue: 1,
-      duration: reduceMotion ? 1 : 400,
+      duration: 220,
       easing: Easing.out(Easing.cubic),
+      isInteraction: false,
       useNativeDriver: USE_NATIVE_DRIVER,
-    }).start();
+    });
+    animation.start();
+    return () => animation.stop();
   }, [progress, reduceMotion, trigger]);
 
   return {
-    opacity: progress,
+    opacity: progress.interpolate({
+      inputRange: [0, 1],
+      outputRange: [0.96, 1],
+    }),
     transform: [
       {
         translateY: progress.interpolate({
           inputRange: [0, 1],
-          outputRange: [14, 0],
+          outputRange: [8, 0],
         }),
       },
     ],
