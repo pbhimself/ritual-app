@@ -38,9 +38,14 @@ import {
 } from 'react-native-gesture-handler';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AppBootstrap from './src/components/AppBootstrap';
+import AppErrorBoundary from './src/components/AppErrorBoundary';
 import LaunchSplash from './src/components/LaunchSplash';
+import PasswordRecoveryScreen from './src/components/PasswordRecoveryScreen';
 import { useEntranceAnimation, useReducedMotion } from './src/hooks/motion';
 import { offlineCoachReply, parseCoachReply, ritualMetrics, type CoachReply } from './src/lib/coach';
+import { trustedAuthCallback, safeStoredAccount } from './src/lib/auth-callback';
+import { nativeSessionStorage } from './src/lib/session-storage';
+import { createTimedFetch } from './src/lib/request';
 import Reanimated, {
   cancelAnimation,
   Easing as ReanimatedEasing,
@@ -84,6 +89,7 @@ import {
   PieChart,
   Phone,
   Plus,
+  RefreshCw,
   Send,
   Settings,
   ShieldCheck,
@@ -546,10 +552,10 @@ const supabaseAnonKey = readRuntimeString(
   DEFAULT_SUPABASE_PUBLISHABLE_KEY,
 );
 const nativeAuthRedirectUrl = `${APP_SCHEME}://${AUTH_CALLBACK_PATH}`;
-const authRedirectUrl = Platform.OS === 'web' && typeof window !== 'undefined' ? window.location.origin : nativeAuthRedirectUrl;
+const authRedirectUrl = Platform.OS === 'web' && typeof window !== 'undefined' ? `${window.location.origin}/auth/callback` : nativeAuthRedirectUrl;
 
 if (Platform.OS === 'web') {
-  WebBrowser.maybeCompleteAuthSession({ skipRedirectCheck: true });
+  WebBrowser.maybeCompleteAuthSession();
 }
 
 function createSupabaseClient() {
@@ -564,11 +570,13 @@ function createSupabaseClient() {
   }
 
   const client = createClient(supabaseUrl, supabaseAnonKey, {
+      global: { fetch: createTimedFetch() },
       auth: {
-        ...(Platform.OS !== 'web' ? { storage: AsyncStorage } : {}),
+        ...(Platform.OS !== 'web' ? { storage: nativeSessionStorage } : {}),
+        flowType: 'pkce',
         autoRefreshToken: true,
         persistSession: true,
-        detectSessionInUrl: Platform.OS === 'web',
+        detectSessionInUrl: false,
       },
     });
 
@@ -966,32 +974,12 @@ async function lookupProfileForUser(client: SupabaseClient | null, user: Supabas
   return data as SupabaseProfile | null;
 }
 
-async function resolveIdentifierEmail(client: SupabaseClient | null, identifier: string) {
+async function resolveIdentifierEmail(identifier: string) {
   const normalized = identifier.trim().toLowerCase();
   if (isValidEmail(normalized)) {
     return normalized;
   }
-  if (!client) {
-    return normalized;
-  }
-  const { data, error } = await client.rpc('email_for_username', { lookup_username: normalized });
-  if (!error && typeof data === 'string' && data) {
-    return data;
-  }
-
-  const fallback = await client
-    .from('profiles')
-    .select('email')
-    .ilike('username', normalized)
-    .maybeSingle();
-  if (fallback.error) {
-    throw fallback.error;
-  }
-  const email = (fallback.data as Pick<SupabaseProfile, 'email'> | null)?.email;
-  if (!email) {
-    throw new Error('Account not found for that username.');
-  }
-  return email;
+  throw new Error('Enter your email address to sign in or reset your password.');
 }
 
 async function readReminderSchedules(storageKey: string) {
@@ -1908,16 +1896,30 @@ function authParamsFromUrl(url: string) {
 }
 
 function isSupabaseAuthRedirectUrl(url: string) {
-  const params = authParamsFromUrl(url);
-  return url.startsWith(`${APP_SCHEME}:`)
-    || params.has('access_token')
-    || params.has('refresh_token')
-    || params.has('code')
-    || params.has('error')
-    || params.has('error_description');
+  return trustedAuthCallback(url, nativeAuthRedirectUrl, Platform.OS === 'web' && typeof window !== 'undefined' ? window.location.origin : undefined);
 }
 
-async function createSessionFromAuthUrl(url: string): Promise<SupabaseSession | null> {
+let authCallbackPromise: Promise<SupabaseSession | null> | null = null;
+let lastAuthCallbackUrl: string | null = null;
+let completedAuthCallbackUrl: string | null = null;
+
+function createSessionFromAuthUrl(url: string): Promise<SupabaseSession | null> {
+  if (!isSupabaseAuthRedirectUrl(url)) return Promise.resolve(null);
+  if (url === completedAuthCallbackUrl && supabase) return supabase.auth.getSession().then(({ data }) => data.session);
+  if (url === lastAuthCallbackUrl && authCallbackPromise) return authCallbackPromise;
+  lastAuthCallbackUrl = url;
+  authCallbackPromise = exchangeAuthCallback(url).then((session) => {
+    completedAuthCallbackUrl = url;
+    return session;
+  }).finally(() => {
+    authCallbackPromise = null;
+    lastAuthCallbackUrl = null;
+    if (Platform.OS === 'web' && typeof window !== 'undefined') window.history.replaceState({}, '', '/');
+  });
+  return authCallbackPromise;
+}
+
+async function exchangeAuthCallback(url: string): Promise<SupabaseSession | null> {
   if (!supabase || !isSupabaseAuthRedirectUrl(url)) {
     return null;
   }
@@ -1963,9 +1965,6 @@ async function signInWithGoogleOAuth(): Promise<SupabaseSession | null> {
     options: {
       redirectTo: authRedirectUrl,
       skipBrowserRedirect: Platform.OS !== 'web',
-      queryParams: {
-        prompt: 'select_account',
-      },
     },
   });
 
@@ -2211,7 +2210,7 @@ async function saveProfileSetupForAccount(
 }
 
 async function resolveEmailForIdentifier(identifier: string) {
-  return resolveIdentifierEmail(supabase, identifier);
+  return resolveIdentifierEmail(identifier);
 }
 
 function shiftBinarySeries(values: number[], distance: number) {
@@ -2472,9 +2471,11 @@ async function loadSupabaseFlowState(userId: string): Promise<Partial<SavedFlowS
 
 function AppRoot() {
   return (
-    <AppBootstrap>
-      <AuthenticatedApp />
-    </AppBootstrap>
+    <AppErrorBoundary>
+      <AppBootstrap>
+        <AuthenticatedApp />
+      </AppBootstrap>
+    </AppErrorBoundary>
   );
 }
 
@@ -2482,6 +2483,7 @@ export default AppRoot;
 
 function AuthenticatedApp() {
   const [ready, setReady] = useState(false);
+  const [recoveringPassword, setRecoveringPassword] = useState(false);
   const [account, setAccount] = useState(DEFAULT_AUTH_ACCOUNT);
   const [signedIn, setSignedIn] = useState(false);
   const [profileSetupSource, setProfileSetupSource] = useState<'create' | 'profile' | null>(null);
@@ -2490,6 +2492,7 @@ function AuthenticatedApp() {
   const [authGateError, setAuthGateError] = useState('');
   const [authGateMessage, setAuthGateMessage] = useState('');
   const reduceMotion = useReducedMotion();
+  const authUserId = useRef<string | null>(null);
 
   useEffect(() => {
     if (!notificationsModule || Platform.OS === 'web') {
@@ -2536,11 +2539,16 @@ function AuthenticatedApp() {
     }, AUTH_STARTUP_TIMEOUT_MS);
 
     const hydrate = async () => {
+      // Remove legacy account copies that included plaintext passwords.
+      await AsyncStorage.removeItem(AUTH_STORAGE_KEY).catch(() => undefined);
       if (supabase) {
         try {
-          const { data } = await supabase.auth.getSession();
+          const initialUrl = Platform.OS === 'web' && typeof window !== 'undefined' ? window.location.href : await ExpoLinking.getInitialURL();
+          const callbackSession = initialUrl && isSupabaseAuthRedirectUrl(initialUrl) ? await createSessionFromAuthUrl(initialUrl) : null;
+          const data = callbackSession ? { session: callbackSession } : (await supabase.auth.getSession()).data;
           if (data.session?.user) {
             const sessionUser = data.session.user;
+            authUserId.current = sessionUser.id;
             const nextAccount = provisionalAuthAccountFromUser(sessionUser);
             if (mounted) {
               setAccount(nextAccount);
@@ -2550,7 +2558,7 @@ function AuthenticatedApp() {
             }
             getProfileForUser(sessionUser)
               .then(async (profile) => {
-                if (!mounted) {
+                if (!mounted || authUserId.current !== sessionUser.id) {
                   return;
                 }
                 const profiledAccount = await withFirstRunTourPending(buildAuthAccountFromUser(sessionUser, profile));
@@ -2593,32 +2601,41 @@ function AuthenticatedApp() {
       }
     });
 
-    const authSubscription = supabase?.auth.onAuthStateChange(async (event, session) => {
+    const authSubscription = supabase?.auth.onAuthStateChange((event, session) => {
       if (!mounted) {
         return;
       }
       if (event === 'SIGNED_OUT' || !session?.user) {
+        setRecoveringPassword(false);
+        authUserId.current = null;
         setSignedIn(false);
         setProfileSetupSource(null);
         return;
       }
       const eventUser = session.user;
+      if (event === 'PASSWORD_RECOVERY') {
+        setRecoveringPassword(true);
+        releaseStartup();
+      }
+      if (authUserId.current === eventUser.id && (event === 'TOKEN_REFRESHED' || event === 'INITIAL_SESSION' || event === 'SIGNED_IN')) return;
+      authUserId.current = eventUser.id;
       const nextAccount = provisionalAuthAccountFromUser(eventUser);
       if (mounted) {
         setAccount(nextAccount);
         setSignedIn(true);
         setProfileSetupSource(null);
       }
-      getProfileForUser(eventUser)
+      // Leave Supabase's auth callback lock before starting further client operations.
+      setTimeout(() => { if (!mounted || authUserId.current !== eventUser.id) return; void getProfileForUser(eventUser)
         .then(async (profile) => {
-          if (!mounted) {
+          if (!mounted || authUserId.current !== eventUser.id) {
             return;
           }
           const profiledAccount = await withFirstRunTourPending(buildAuthAccountFromUser(eventUser, profile));
           setAccount(profiledAccount);
           setProfileSetupSource(profileSetupSourceForAccount(profiledAccount));
         })
-        .catch(() => undefined);
+        .catch(() => undefined); }, 0);
     }).data.subscription;
 
     const appStateSubscription = supabase && Platform.OS !== 'web'
@@ -2646,7 +2663,7 @@ function AuthenticatedApp() {
     setSignedIn(nextSignedIn);
     AsyncStorage.setItem(
       AUTH_STORAGE_KEY,
-      JSON.stringify({ account: nextAccount, signedIn: nextSignedIn }),
+      JSON.stringify({ account: safeStoredAccount(nextAccount), signedIn: nextSignedIn }),
     ).catch(() => undefined);
   }, []);
 
@@ -2661,11 +2678,13 @@ function AuthenticatedApp() {
         return;
       }
       try {
+        if (authParamsFromUrl(url).get('type') === 'recovery') setRecoveringPassword(true);
         const session = await createSessionFromAuthUrl(url);
         if (!session?.user || !mounted) {
           return;
         }
         const sessionUser = session.user;
+        authUserId.current = sessionUser.id;
         const nextAccount = await withFirstRunTourPending(provisionalAuthAccountFromUser(sessionUser));
         if (!mounted) {
           return;
@@ -2679,7 +2698,7 @@ function AuthenticatedApp() {
         saveLocalAuth(nextAccount, true);
         getProfileForUser(sessionUser)
           .then(async (profile) => {
-            if (!mounted) {
+            if (!mounted || authUserId.current !== sessionUser.id) {
               return;
             }
             const profiledAccount = await withFirstRunTourPending(buildAuthAccountFromUser(sessionUser, profile));
@@ -2761,6 +2780,23 @@ function AuthenticatedApp() {
     );
   }
 
+  if (recoveringPassword && signedIn) {
+    const closeRecovery = async () => {
+      const result = await supabase?.auth.signOut({ scope: 'local' });
+      if (result?.error) throw result.error;
+      setRecoveringPassword(false);
+      setSignedIn(false);
+      authUserId.current = null;
+    };
+    return <PasswordRecoveryScreen onCancel={closeRecovery} onSave={async (password) => {
+      if (!supabase) throw new Error('Sign-in is not configured.');
+      const { error } = await supabase.auth.updateUser({ password });
+      if (error) throw error;
+      await closeRecovery();
+      setAuthGateMessage('Password updated. Sign in with your new password.');
+    }} />;
+  }
+
   if (!signedIn) {
     return (
       <AuthGate
@@ -2810,6 +2846,7 @@ function AuthenticatedApp() {
 
   return (
     <FlowApp
+      key={account.id ?? 'local'}
       userId={account.id}
       initialMissedRitualId={notificationRitualId}
       initialTab={flowInitialTab}
@@ -2823,14 +2860,13 @@ function AuthenticatedApp() {
         setFlowInitialTab('profile');
         setProfileSetupSource('profile');
       }}
-      onLogout={() => {
+      onLogout={async () => {
         if (supabase) {
-          supabase.auth.signOut().catch(() => undefined);
-          saveLocalAuth(account, false);
-          setSignedIn(false);
-          setProfileSetupSource(null);
-          return;
+          const { error } = await supabase.auth.signOut({ scope: 'local' });
+          if (error) throw error;
         }
+        authUserId.current = null;
+        setProfileSetupSource(null);
         saveLocalAuth(account, false);
       }}
     />
@@ -2938,15 +2974,15 @@ function AuthGate({
   const submitSignIn = async () => {
     clearFeedback();
     if (!identifier.trim() || !password) {
-      setError('Enter your email or username and password.');
+      setError('Enter your email and password.');
       return;
     }
-    if (matchesAccount(TEST_AUTH_ACCOUNT)) {
+    if (__DEV__ && matchesAccount(TEST_AUTH_ACCOUNT)) {
       setSubmitting(true);
       const nextAccount = await withFirstRunTourPending(TEST_AUTH_ACCOUNT);
       await AsyncStorage.setItem(
         AUTH_STORAGE_KEY,
-        JSON.stringify({ account: nextAccount, signedIn: rememberMe }),
+        JSON.stringify({ account: safeStoredAccount(nextAccount), signedIn: rememberMe }),
       ).catch(() => undefined);
       setSubmitting(false);
       onLogin(nextAccount);
@@ -2968,15 +3004,15 @@ function AuthGate({
           setError(signInError
             ? cleanAuthError(
                 signInError,
-                'Email/username or password is incorrect.',
+                'Email or password is incorrect.',
                 'Secure connection to Supabase failed on this device, so sign-in could not finish. Check automatic date/time, update Android System WebView or Chrome, try another network, then try again.',
               )
-            : 'Email/username or password is incorrect.');
+            : 'Email or password is incorrect.');
           return;
         }
         setPendingConfirmationEmail('');
         const profile = await getProfileForUser(data.user);
-        const nextAccount = await withFirstRunTourPending({ ...buildAuthAccountFromUser(data.user, profile), password });
+        const nextAccount = await withFirstRunTourPending(buildAuthAccountFromUser(data.user, profile));
         onLogin(nextAccount);
       } catch (authError) {
         setError(cleanAuthError(
@@ -3090,7 +3126,7 @@ function AuthGate({
         if (responseSession) {
           const profile = await upsertProfileForUser(responseUser, username, trimmedName, trimmedEmail);
           await supabase.auth.signOut().catch(() => undefined);
-          const createdAccount = { ...buildAuthAccountFromUser(responseUser, profile), password, firstRunTourPending: true };
+          const createdAccount = { ...buildAuthAccountFromUser(responseUser, profile), firstRunTourPending: true };
           await AsyncStorage.setItem(
             AUTH_STORAGE_KEY,
             JSON.stringify({ account: createdAccount, signedIn: false }),
@@ -3166,7 +3202,7 @@ function AuthGate({
     const normalizedIdentifier = identifier.trim().toLowerCase();
     if (supabase) {
       if (!normalizedIdentifier) {
-        setError('Enter your email or username.');
+        setError('Enter your email address.');
         return;
       }
       try {
@@ -3395,14 +3431,14 @@ function AuthGate({
                       <AuthInput
                         inputRef={signInIdentifierRef}
                         icon={Mail}
-                        label="Email or username"
+                        label="Email"
                         value={identifier}
                         onChangeText={(value) => {
                           setIdentifier(value);
                           setPendingConfirmationEmail('');
                           clearFeedback();
                         }}
-                        placeholder="Pratik or pratik@rituals.app"
+                        placeholder="you@example.com"
                         textContentType="username"
                         autoComplete="username"
                         returnKeyType={isReset && usesSupabaseAuth ? 'done' : 'next'}
@@ -4697,7 +4733,7 @@ function FlowApp({
   starterOnboardingPending: boolean;
   firstRunTourPending: boolean;
   onOpenProfileSetup: () => void;
-  onLogout: () => void;
+  onLogout: () => Promise<void>;
 }) {
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
@@ -4706,6 +4742,9 @@ function FlowApp({
   const currentDate = todayIso(currentTime);
   const [activeTab, setActiveTab] = useState<TabKey>(initialTab);
   const [rituals, setRituals] = useState(defaultState.rituals);
+  const ritualsRef = useRef(rituals);
+  ritualsRef.current = rituals;
+  const savingRituals = useRef(new Set<string>());
   const [checkins, setCheckins] = useState(defaultState.checkins);
   const [totalActiveRituals, setTotalActiveRituals] = useState(defaultState.totalActiveRituals);
   const [baseDoneFromOtherHabits, setBaseDoneFromOtherHabits] = useState(defaultState.baseDoneFromOtherHabits);
@@ -4727,6 +4766,8 @@ function FlowApp({
   const [particles, setParticles] = useState<BurstParticle[]>([]);
   const [newRitualId, setNewRitualId] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
+  const [syncError, setSyncError] = useState(false);
+  const [reloadVersion, setReloadVersion] = useState(0);
   const [starterOnboardingAllowed, setStarterOnboardingAllowed] = useState(starterOnboardingPending && firstRunTourPending);
   const [todayTourSeen, setTodayTourSeen] = useState(!firstRunTourPending);
   const isTablet = width >= TABLET_MIN_WIDTH;
@@ -4757,6 +4798,7 @@ function FlowApp({
   useEffect(() => {
     let mounted = true;
     setHydrated(false);
+    setSyncError(false);
 
     const applyState = (state: SavedFlowState, tourAlreadySeen: boolean) => {
       const hasCompletedTour = tourAlreadySeen || Boolean(state.tourCompleted);
@@ -4779,7 +4821,7 @@ function FlowApp({
     };
 
     const loadLocal = async () => {
-      const stored = await AsyncStorage.getItem(storageKey);
+      const stored = await AsyncStorage.getItem(storageKey).catch(() => null);
       if (!stored) {
         return defaultState;
       }
@@ -4809,9 +4851,9 @@ function FlowApp({
             return;
           }
         } catch {
-          const local = await loadLocal();
           if (mounted) {
             applyState(local, tourAlreadySeen);
+            setSyncError(true);
           }
           return;
         }
@@ -4836,7 +4878,7 @@ function FlowApp({
     return () => {
       mounted = false;
     };
-  }, [canUseRemote, firstRunTourPending, storageKey, todayTourSeenStorageKey, userId]);
+  }, [canUseRemote, firstRunTourPending, reloadVersion, storageKey, todayTourSeenStorageKey, userId]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -5161,59 +5203,33 @@ function FlowApp({
     setTourStepIndex((current) => current + 1);
   }, [finishTodayTour, tourStepIndex]);
 
-  const toggleRitual = (ritualId: string, x: number, y: number) => {
-    const target = rituals.find((ritual) => ritual.id === ritualId);
-    if (!target) {
-      return;
+  const toggleRitual = async (ritualId: string, x: number, y: number) => {
+    const target = ritualsRef.current.find((ritual) => ritual.id === ritualId);
+    if (!target || savingRituals.current.has(ritualId)) {
+      return false;
     }
+    savingRituals.current.add(ritualId);
+    const logDate = todayIso();
     const nextDoneToday = !target.doneToday;
     const completionHour = nextDoneToday ? nowHour() : null;
     const pointDelta = nextDoneToday ? 10 + (isCompletionInUsualWindow({ ...target, completedAt: completionHour }) ? 5 : 0) : -(10 + (isCompletionInUsualWindow(target) ? 5 : 0));
-    const hadDoneBeforeToggle = rituals.some((ritual) => ritual.doneToday);
-    const hasDoneAfterToggle = rituals.some((ritual) => ritual.id === ritualId ? nextDoneToday : ritual.doneToday);
-    let toastMessage = '';
-    let burstPalette: HabitPalette | null = null;
-
-    setRituals((current) =>
-      current.map((ritual) => {
-        if (ritual.id !== ritualId) {
-          return ritual;
-        }
-        const doneToday = nextDoneToday;
-        const streakDays = Math.max(0, ritual.streakDays + (doneToday ? 1 : -1));
-        const weekly = [...ritual.weekly];
-        weekly[weekly.length - 1] = doneToday ? 1 : 0;
-        const heat = [...ritual.heat];
-        heat[heat.length - 1] = doneToday ? 1 : 0;
-        const next = {
-          ...ritual,
-          doneToday,
-          completedAt: completionHour,
-          streakDays,
-          bestStreakDays: Math.max(ritual.bestStreakDays, streakDays),
-          weekly,
-          heat,
-        };
-        toastMessage = doneToday ? `✓ ${ritual.name} complete - streak ${streakDays} days` : `${ritual.name} unmarked`;
-        burstPalette = doneToday ? habitPalette[ritual.paletteKey] : null;
-        return next;
-      }),
-    );
+    const applyRitual = (replacement: Ritual) => {
+      const previous = ritualsRef.current;
+      const next = previous.map((ritual) => ritual.id === ritualId ? replacement : ritual);
+      const streakDelta = Number(next.some((ritual) => ritual.doneToday)) - Number(previous.some((ritual) => ritual.doneToday));
+      ritualsRef.current = next;
+      setRituals(next);
+      setOverallStreak((current) => Math.max(0, current + streakDelta));
+    };
+    const heat = [...target.heat.slice(0, -1), Number(nextDoneToday)];
+    const weekly = [...target.weekly.slice(0, -1), Number(nextDoneToday)];
+    const streakDays = currentStreakFromHeat(heat);
+    applyRitual({ ...target, doneToday: nextDoneToday, completedAt: completionHour, heat, weekly, streakDays, bestStreakDays: Math.max(target.bestStreakDays, streakDays) });
     setRhythmPoints((current) => Math.max(0, current + pointDelta));
-    if (!hadDoneBeforeToggle && hasDoneAfterToggle) {
-      setOverallStreak((current) => current + 1);
-    } else if (hadDoneBeforeToggle && !hasDoneAfterToggle && !nextDoneToday) {
-      setOverallStreak((current) => Math.max(0, current - 1));
-    }
-
     impact();
-    if (burstPalette) {
-      fireBurst(x, y, burstPalette);
-    }
-    showToast(toastMessage);
-
-    if (supabase && canUseRemote && userId) {
-      const logDate = todayIso();
+    if (nextDoneToday) fireBurst(x, y, habitPalette[target.paletteKey]);
+    try {
+      if (supabase && canUseRemote && userId) {
       const write = nextDoneToday
         ? supabase.from('habit_logs').upsert(
             {
@@ -5234,11 +5250,22 @@ function FlowApp({
             .eq('user_id', userId)
             .eq('activity_date', logDate);
 
-      write.then(({ error: writeError }) => {
-        if (writeError) {
-          showToast(`Database save failed: ${writeError.message}`);
-        }
-      });
+        const { error: writeError } = await write;
+        if (writeError) throw writeError;
+      }
+      showToast(nextDoneToday ? `${target.name} complete - streak ${streakDays} days` : `${target.name} unmarked`);
+      return true;
+    } catch {
+      if (todayIso() === logDate) {
+        // Restore only this ritual so another successful save is never undone.
+        const current = ritualsRef.current.find((ritual) => ritual.id === ritualId);
+        if (current) applyRitual({ ...current, doneToday: target.doneToday, completedAt: target.completedAt, heat: target.heat, weekly: target.weekly, streakDays: target.streakDays, bestStreakDays: target.bestStreakDays });
+        setRhythmPoints((currentPoints) => Math.max(0, currentPoints - pointDelta));
+      }
+      showToast('Completion could not be saved. Check your connection and try again.');
+      return false;
+    } finally {
+      savingRituals.current.delete(ritualId);
     }
   };
 
@@ -5267,14 +5294,15 @@ function FlowApp({
       aiAdvice: 'Try to update the ritual before the closing time next time.',
       resolvedAt: Date.now(),
     };
+    const completed = await toggleRitual(ritual.id, 0, 0);
+    if (!completed) return;
     try {
       await persistCheckinsRemote([record]);
     } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Could not save your check-in. Please try again.');
+      showToast('Completion saved, but the late check-in could not be saved.');
       return;
     }
-    toggleRitual(ritual.id, 0, 0);
-    setCheckins((current) => [record, ...current]);
+    setCheckins((current) => [record, ...current.filter((item) => item.id !== record.id)]);
     showToast(`Good job. ${ritual.name} marked completed late.`);
   };
 
@@ -5437,7 +5465,7 @@ function FlowApp({
     impact();
   };
 
-  const persistRemoteSetting = <K extends keyof FlowSettings>(key: K, value: FlowSettings[K]) => {
+  const persistRemoteSetting = async <K extends keyof FlowSettings>(key: K, value: FlowSettings[K]) => {
     if (!supabase || !canUseRemote || !userId) {
       return;
     }
@@ -5445,22 +5473,26 @@ function FlowApp({
     if (!column) {
       return;
     }
-    supabase
+    const { error } = await supabase
       .from('profiles')
       .update({ [column]: value })
-      .eq('id', userId)
-      .then(({ error: writeError }) => {
-        if (writeError) {
-          showToast(`Database save failed: ${writeError.message}`);
-        }
-      });
+      .eq('id', userId);
+    if (error) throw error;
   };
 
+  const settingVersions = useRef(new Map<keyof FlowSettings, number>());
   const applySetting = <K extends keyof FlowSettings>(key: K, value: FlowSettings[K]) => {
+    const previous = settings[key];
+    const version = (settingVersions.current.get(key) ?? 0) + 1;
+    settingVersions.current.set(key, version);
     setSettings((current) => ({ ...current, [key]: value }));
-    showToast(key === 'floTone' ? `Flo style: ${String(value)}` : value ? 'Setting enabled' : 'Setting disabled');
     impact();
-    persistRemoteSetting(key, value);
+    persistRemoteSetting(key, value).then(() => {
+      if (settingVersions.current.get(key) === version) showToast('Setting saved');
+    }).catch(() => {
+      if (settingVersions.current.get(key) === version) setSettings((current) => ({ ...current, [key]: previous }));
+      showToast('Setting could not be saved. Please try again.');
+    });
   };
 
   const updateSetting = <K extends keyof FlowSettings>(key: K, value: FlowSettings[K]) => {
@@ -5469,7 +5501,7 @@ function FlowApp({
         .then((granted) => {
           if (!granted) {
             setSettings((current) => ({ ...current, pushNotifications: false }));
-            persistRemoteSetting('pushNotifications', false);
+            persistRemoteSetting('pushNotifications', false).catch(() => undefined);
             showToast('Notification permission not granted');
             return;
           }
@@ -5477,7 +5509,7 @@ function FlowApp({
         })
         .catch(() => {
           setSettings((current) => ({ ...current, pushNotifications: false }));
-          persistRemoteSetting('pushNotifications', false);
+          persistRemoteSetting('pushNotifications', false).catch(() => undefined);
           showToast('Notification permission not granted');
         });
       return;
@@ -5492,8 +5524,8 @@ function FlowApp({
       notifications: notificationsModule as never,
       storageKey: reminderStorageKey,
     }).catch(() => undefined);
-    onLogout();
-  }, [onLogout, reminderStorageKey, rituals]);
+    onLogout().catch(() => showToast('Could not sign out. Check your connection and try again.'));
+  }, [onLogout, reminderStorageKey, rituals, showToast]);
 
   const changeTab = useCallback((nextTab: TabKey) => {
     if (nextTab === activeTab) {
@@ -5552,7 +5584,7 @@ function FlowApp({
     );
   }
 
-  if (starterOnboardingAllowed && !onboardingDreams.length && rituals.length === 0) {
+  if (!syncError && starterOnboardingAllowed && !onboardingDreams.length && rituals.length === 0) {
     return (
       <OnboardingDreamFlow
         reduceMotion={reduceMotion}
@@ -5577,6 +5609,14 @@ function FlowApp({
             screenStyle,
           ]}
         >
+          {syncError ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 10, gap: 12 }}>
+              <Text accessibilityRole="alert" style={{ flex: 1, fontSize: 13, color: colors.inkSoft }}>Could not refresh your rituals. Showing saved data.</Text>
+              <Pressable accessibilityRole="button" accessibilityLabel="Retry loading rituals" onPress={() => setReloadVersion((current) => current + 1)} style={{ padding: 10 }}>
+                <RefreshCw size={20} color={colors.ink} />
+              </Pressable>
+            </View>
+          ) : null}
           {activeTab === 'today' ? (
             <TodayScreen
               username={username}
@@ -7217,7 +7257,7 @@ async function requestCoachReply(message: string, history: CoachMessage[], ritua
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) return offlineCoachReply(message, rituals);
       const { data, error } = await supabase.functions.invoke('coach-chat', {
-        timeout: 10000,
+        timeout: 22000,
         signal,
         body: {
           message,

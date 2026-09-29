@@ -4,12 +4,13 @@ type AIOptions = { system: string; message: string; history?: Message[]; maxToke
 export async function generateAI({ system, message, history = [], maxTokens = 1000 }: AIOptions): Promise<string> {
   const nvidiaKey = Deno.env.get('NVIDIA_API_KEY');
   const anthropicKey = Deno.env.get('ANTHROPIC_API_KEY');
+  const nvidiaModel = Deno.env.get('NVIDIA_MODEL') || 'moonshotai/kimi-k3';
   const messages = [...history.slice(-10).map((item) => ({ role: item.role, content: item.text })), { role: 'user', content: message }];
   const providers: Array<{ name: string; url: string; headers: Record<string, string>; body: unknown; timeout: number }> = [
     ...(nvidiaKey ? [{
       name: 'nvidia', url: 'https://integrate.api.nvidia.com/v1/chat/completions',
       headers: { Authorization: `Bearer ${nvidiaKey}`, 'Content-Type': 'application/json' },
-      body: { model: Deno.env.get('NVIDIA_MODEL') || 'moonshotai/kimi-k3', reasoning_effort: 'low', max_tokens: maxTokens, temperature: 0.4, stream: false, messages: [{ role: 'system', content: system }, ...messages] },
+      body: { model: nvidiaModel, ...(nvidiaModel.startsWith('moonshotai/') ? { reasoning_effort: 'low' } : {}), ...(nvidiaModel === 'nvidia/nemotron-3.5-lightning-30b-a3b' ? { chat_template_kwargs: { enable_thinking: false } } : {}), max_tokens: maxTokens, temperature: 0.4, stream: false, messages: [{ role: 'system', content: system }, ...messages] },
       timeout: 11000,
     }] : []),
     ...(anthropicKey ? [{
@@ -33,7 +34,7 @@ export async function generateAI({ system, message, history = [], maxTokens = 10
       return text.trim();
     } catch (error) {
       // Never log prompts, user data or credentials in provider diagnostics.
-      console.warn('AI provider unavailable', provider.name, error instanceof Error ? error.name : 'unknown');
+      console.warn('AI provider unavailable', provider.name, error instanceof Error ? (/^HTTP \d{3}$/.test(error.message) ? error.message : error.name) : 'unknown');
     }
   }
   throw new Error('AI unavailable');

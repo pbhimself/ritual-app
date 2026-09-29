@@ -29,7 +29,10 @@ serve(async (req) => {
   const { data: { user }, error: authError } = await supabase.auth.getUser();
   if (authError || !user) return Response.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders });
 
-  const body = await req.json().catch(() => ({}));
+  const raw = await req.text();
+  if (raw.length > 16000) return Response.json({ error: 'Request too large' }, { status: 413, headers: corsHeaders });
+  let body;
+  try { body = JSON.parse(raw); } catch { return Response.json({ error: 'Invalid JSON' }, { status: 400, headers: corsHeaders }); }
   const ritual = body?.ritual ?? {};
   const reason = typeof body?.reason === 'string' ? body.reason : '';
   const tone = body?.tone === 'coach' || body?.tone === 'direct' || body?.tone === 'gentle' ? body.tone : 'gentle';
@@ -37,9 +40,9 @@ serve(async (req) => {
   if (!reason.trim() || reason.length > 2000) return Response.json({ error: 'A reason of 1 to 2000 characters is required' }, { status: 400, headers: corsHeaders });
 
   const fallback = localFloCheckinReply({
-    name: typeof ritual.name === 'string' ? ritual.name : 'your ritual',
+    name: typeof ritual.name === 'string' ? ritual.name.slice(0, 128) : 'your ritual',
     reminderTime: typeof ritual.reminderTime === 'string' ? ritual.reminderTime : null,
-    why: typeof ritual.why === 'string' ? ritual.why : '',
+    why: typeof ritual.why === 'string' ? ritual.why.slice(0, 1000) : '',
   }, reason, tone, hasPattern);
 
   if (!apiKey) {
@@ -110,6 +113,7 @@ serve(async (req) => {
         && ['valid_reason', 'avoidable_distraction', 'unclear_reason'].includes(parsed.reason_category)
     ) {
       return Response.json({
+        source: 'ai',
         message: parsed.message,
         category: parsed.category,
         protect_streak: parsed.protect_streak,
@@ -169,11 +173,12 @@ function localFloCheckinReply(
       : 'The reason is not specific enough to identify the real blocker.';
 
   return {
+    source: 'offline',
     message: reasonCategory === 'valid_reason'
-      ? `I understand. I saved this as a valid reason. ${advice}`
+      ? `I understand. This sounds like a valid reason. ${advice}`
       : reasonCategory === 'avoidable_distraction'
-        ? `I saved your reason. This looks like avoidable time usage because it replaced ${ritual.name}. ${advice}`
-        : `I saved this, but the reason is not fully clear. ${advice}`,
+        ? `This looks like avoidable time usage because it replaced ${ritual.name}. ${advice}`
+        : `The reason is not fully clear yet. ${advice}`,
     category,
     protect_streak: protect,
     suggested_action: suggestedAction,

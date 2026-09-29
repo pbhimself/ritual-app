@@ -12,8 +12,6 @@ import type { ReactNode } from 'react';
 import { StyleSheet } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { useReducedMotion } from '../hooks/motion';
-import LaunchSplash from './LaunchSplash';
 
 const FONT_STARTUP_FALLBACK_MS = 1600;
 
@@ -28,10 +26,8 @@ export default function AppBootstrap({ children }: { children: ReactNode }) {
     PlusJakartaSans_500Medium,
     PlusJakartaSans_600SemiBold,
   });
-  const reduceMotion = useReducedMotion();
   const [fontStartupTimedOut, setFontStartupTimedOut] = useState(false);
-  const canRenderApp = fontsLoaded || Boolean(fontError);
-  const shouldShowStartupFallback = !canRenderApp && fontStartupTimedOut;
+  const canRenderApp = fontsLoaded || Boolean(fontError) || fontStartupTimedOut;
 
   useEffect(() => {
     const timer = setTimeout(() => setFontStartupTimedOut(true), FONT_STARTUP_FALLBACK_MS);
@@ -39,24 +35,15 @@ export default function AppBootstrap({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (!canRenderApp && !shouldShowStartupFallback) {
+    if (!canRenderApp) {
       return undefined;
     }
     SplashScreen.hideAsync().catch(() => undefined);
     return undefined;
-  }, [canRenderApp, shouldShowStartupFallback]);
+  }, [canRenderApp]);
 
   if (!canRenderApp) {
-    if (!shouldShowStartupFallback) {
-      return null;
-    }
-    return (
-      <LaunchSplash
-        reduceMotion={reduceMotion}
-        message="Starting Rituals..."
-        fontsReady={false}
-      />
-    );
+    return null;
   }
 
   return (

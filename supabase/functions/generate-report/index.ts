@@ -52,8 +52,8 @@ serve(async (req) => {
       .from('ai_reports')
       .select('id,report,created_at')
       .eq('user_id', user.id)
-      .eq('window_start', startIso)
-      .eq('window_end', endIso)
+      .eq('report_start', startIso)
+      .eq('report_end', endIso)
       .eq('interval_days', intervalDays)
       .maybeSingle();
     if (cached?.report) {
@@ -69,21 +69,25 @@ serve(async (req) => {
 
   const [{ data: habits, error: habitsError }, { data: logs, error: logsError }, { data: checkins, error: checkinsError }] = await Promise.all([
     supabase.from('habits').select('id,name,color,created_at').eq('user_id', user.id).eq('is_archived', false),
-    supabase.from('habit_logs').select('habit_id,log_date,completed_at').eq('user_id', user.id).gte('log_date', startIso).lte('log_date', endIso),
-    supabase.from('ritual_checkins').select('task_category,user_reason_raw,ai_reason_category,completed_late,completion_status,checkin_date').eq('user_id', user.id).gte('checkin_date', startIso).lte('checkin_date', endIso),
+    supabase.from('habit_logs').select('habit_id,log_date,completed_at').eq('user_id', user.id).eq('completed', true).gte('log_date', startIso).lte('log_date', endIso),
+    supabase.from('ritual_checkins').select('ritual_id,habit_id,task_category,user_reason_raw,ai_reason_category,completed_late,completion_status,checkin_date').eq('user_id', user.id).gte('checkin_date', startIso).lte('checkin_date', endIso),
   ]);
 
   if (habitsError || logsError || checkinsError) return Response.json({ error: 'Could not load complete report data' }, { status: 503, headers: corsHeaders });
-  const report = buildReport(habits ?? [], logs ?? [], checkins ?? [], startIso, endIso, intervalDays, timeZone);
+  const activeIds = new Set((habits ?? []).map((habit) => habit.id));
+  const activeLogs = (logs ?? []).filter((log) => activeIds.has(log.habit_id));
+  const activeCheckins = (checkins ?? []).filter((row) => activeIds.has(row.ritual_id ?? row.habit_id));
+  const report = buildReport(habits ?? [], activeLogs, activeCheckins, startIso, endIso, intervalDays, timeZone);
   report.advice = await improveAdvice(report).catch(() => report.advice);
 
   const { data, error } = await supabase.from('ai_reports').upsert({
     user_id: user.id,
-    window_start: startIso,
-    window_end: endIso,
+    report_start: startIso,
+    report_end: endIso,
     interval_days: intervalDays,
     report,
-  }, { onConflict: 'user_id,window_start,window_end,interval_days' }).select('id,report,created_at').single();
+    created_at: new Date().toISOString(),
+  }, { onConflict: 'user_id,report_start,report_end,interval_days' }).select('id,report,created_at').single();
   if (error) return Response.json({ error: error.message }, { status: 500, headers: corsHeaders });
   return Response.json({ ...report, id: data.id, generatedAt: data.created_at, userName: profile?.name ?? user.email ?? 'Rituals user' }, { headers: corsHeaders });
 });
