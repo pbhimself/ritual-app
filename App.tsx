@@ -1859,6 +1859,9 @@ function shouldPromptProfileSetup(account: AuthAccount) {
 }
 
 function profileSetupSourceForAccount(account: AuthAccount, source: 'create' | 'profile' = 'create') {
+  if (account.firstRunTourPending || account.starterOnboardingPending) {
+    return null;
+  }
   return shouldPromptProfileSetup(account) ? source : null;
 }
 
@@ -5584,7 +5587,7 @@ function FlowApp({
     );
   }
 
-  if (!syncError && starterOnboardingAllowed && !onboardingDreams.length && rituals.length === 0) {
+  if (!syncError && starterOnboardingAllowed && !onboardingDreams.length) {
     return (
       <OnboardingDreamFlow
         reduceMotion={reduceMotion}
@@ -8804,9 +8807,9 @@ function AskFloLauncher({
   onOpen: () => void;
 }) {
   const { width, height } = useWindowDimensions();
-  const compactLauncher = width < 360;
-  const launcherWidth = compactLauncher ? ASK_FLO_HEIGHT : ASK_FLO_WIDTH;
-  const edgePadding = compactLauncher ? 22 : ASK_FLO_EDGE_PADDING;
+  const compactLauncher = true;
+  const launcherWidth = ASK_FLO_HEIGHT;
+  const edgePadding = width < 360 ? 18 : ASK_FLO_EDGE_PADDING;
   const translateX = useSharedValue(0);
   const translateY = useSharedValue(0);
   const dragOrigin = useRef({ x: 0, y: 0 });

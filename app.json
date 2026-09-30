@@ -1,9 +1,9 @@
 {
   "expo": {
-    "name": "Rituals Habit",
+    "name": "Rituals Habbits",
     "slug": "ritual-app",
     "scheme": "com.pratikbhangale.rituals",
-    "version": "1.0.14",
+    "version": "1.0.15",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -15,7 +15,7 @@
     },
     "android": {
       "package": "com.pratikbhangale.rituals",
-      "versionCode": 15,
+      "versionCode": 16,
       "softwareKeyboardLayoutMode": "resize",
       "backgroundColor": "#0A1226",
       "userInterfaceStyle": "light",
