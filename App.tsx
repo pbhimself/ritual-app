@@ -29,7 +29,7 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import type { StyleProp, TextInputProps, ViewStyle } from 'react-native';
+import type { AccessibilityRole, AccessibilityState, StyleProp, TextInputProps, ViewStyle } from 'react-native';
 import {
   PanGestureHandler,
   State,
@@ -3596,10 +3596,10 @@ function OnboardingDreamFlow({
     }));
   const stepIndex = step === 'dream' ? 0 : 1;
   const title = step === 'dream'
-    ? "What's your ritual dream?"
+    ? "What's your dream?"
     : 'Starter rituals for your focus';
   const subtitle = step === 'dream'
-    ? "Pick one or more directions. You can change everything later."
+    ? 'Select one or more dreams. You can change everything later.'
     : 'Choose up to 5 starters. These become your first rituals.';
   const selectedDreamLabel = selectedDreams.length === 1
     ? '1 focus selected'
@@ -3741,6 +3741,9 @@ function OnboardingDreamFlow({
                     <PressScale
                       key={option.id}
                       reduceMotion={reduceMotion}
+                      accessibilityRole="checkbox"
+                      accessibilityLabel={`${option.title}. ${option.description}`}
+                      accessibilityState={{ checked: selected, selected }}
                       onPress={() => toggleDream(option.id)}
                       style={[
                         styles.dreamCard,
@@ -4671,6 +4674,8 @@ function GoogleGMark() {
 function PressScale({
   children,
   accessibilityLabel,
+  accessibilityRole = 'button',
+  accessibilityState,
   onPress,
   style,
   reduceMotion,
@@ -4678,6 +4683,8 @@ function PressScale({
 }: {
   children: ReactNode;
   accessibilityLabel?: string;
+  accessibilityRole?: AccessibilityRole;
+  accessibilityState?: AccessibilityState;
   onPress?: () => void;
   style?: StyleProp<ViewStyle>;
   reduceMotion: boolean;
@@ -4690,9 +4697,9 @@ function PressScale({
 
   return (
     <Pressable
-      accessibilityRole="button"
+      accessibilityRole={accessibilityRole}
       accessibilityLabel={accessibilityLabel}
-      accessibilityState={{ disabled }}
+      accessibilityState={{ ...accessibilityState, disabled: disabled || accessibilityState?.disabled }}
       disabled={disabled}
       onPress={onPress}
       onPressIn={() => {
