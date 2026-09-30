@@ -6,6 +6,7 @@ const corsHeaders = {
   'access-control-allow-headers': 'authorization, x-client-info, apikey, content-type',
   'access-control-allow-methods': 'POST, OPTIONS',
 };
+const DEFAULT_NVIDIA_MODEL = 'nvidia/nemotron-3-super-120b-a12b';
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -59,9 +60,8 @@ serve(async (req) => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: Deno.env.get('NVIDIA_MODEL') || 'moonshotai/kimi-k3',
-        reasoning_effort: 'low',
-        max_tokens: 1800,
+        model: Deno.env.get('NVIDIA_MODEL') || DEFAULT_NVIDIA_MODEL,
+        max_tokens: 700,
         temperature: 0.7,
         stream: false,
         messages: [

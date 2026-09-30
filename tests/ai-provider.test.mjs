@@ -17,8 +17,8 @@ test('provider failover, bounds and malformed responses', async () => {
   };
   try {
     assert.equal(await generateAI({ system: 'coach', message: 'help' }), 'Useful reply');
-    assert.equal(calls.length, 2);
-    assert.equal(JSON.parse(calls[0].options.body).reasoning_effort, 'low');
+    assert.equal(calls.length, 3);
+    assert.equal(JSON.parse(calls[0].options.body).model, 'nvidia/nemotron-3-super-120b-a12b');
     assert.ok(calls.every((call) => call.options.signal instanceof AbortSignal));
     globalThis.fetch = async () => Response.json({ choices: [{ message: { content: '' } }] });
     env.delete('ANTHROPIC_API_KEY');
@@ -32,5 +32,6 @@ test('provider failover, bounds and malformed responses', async () => {
 });
 test('JSON envelope accepts fenced objects and rejects partial or non-object data', () => {
   assert.deepEqual(parseObject('```json\n{"text":"ok"}\n```'), { text: 'ok' });
+  assert.deepEqual(parseObject('Here is the JSON:\n{"text":"ok","suggestedActions":[]}'), { text: 'ok', suggestedActions: [] });
   for (const value of ['null', '[]', 'not json', '{"text":']) assert.equal(parseObject(value), null);
 });
